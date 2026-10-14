@@ -1,0 +1,232 @@
+#include "mahony.hpp"
+
+#include <cmath>
+
+#include "tools/math_tools/math_tools.hpp"
+namespace sp
+{
+Mahony::Mahony(float dt, float kp, float ki)
+: dt_(dt),
+  two_kp_(2 * kp),
+  two_ki_(2 * ki),
+  inited_(false),
+  integral_fbx_(0.0f),
+  integral_fby_(0.0f),
+  integral_fbz_(0.0f)
+{
+}
+
+void Mahony::update(const float acc[3], const float gyro[3])
+{
+  update(acc[0], acc[1], acc[2], gyro[0], gyro[1], gyro[2]);
+}
+
+void Mahony::update(float ax, float ay, float az, float wx, float wy, float wz)
+{
+  if (!inited_) {
+    inited_ = true;
+    init(ax, ay, az);
+    return;
+  }
+  w[0] = wx;
+  w[1] = wy;
+  w[2] = wz;
+  float gx = wx;
+  float gy = wy;
+  float gz = wz;
+
+  // Normalise accelerometer measurement
+  float norm = 1.0f / std::sqrt(ax * ax + ay * ay + az * az);
+  ax *= norm;
+  ay *= norm;
+  az *= norm;
+
+  // Estimated direction of gravity and vector perpendicular to magnetic flux
+  float halfvx = this->q[1] * this->q[3] - this->q[0] * this->q[2];
+  float halfvy = this->q[0] * this->q[1] + this->q[2] * this->q[3];
+  float halfvz = this->q[0] * this->q[0] - 0.5f + this->q[3] * this->q[3];
+
+  // Error is sum of cross product between estimated and measured direction of gravity
+  float halfex = (ay * halfvz - az * halfvy);
+  float halfey = (az * halfvx - ax * halfvz);
+  float halfez = (ax * halfvy - ay * halfvx);
+
+  // Compute and apply integral feedback if enabled
+  if (two_ki_ > 0.0f) {
+    // integral error scaled by Ki
+    integral_fbx_ += two_ki_ * halfex * dt_;
+    integral_fby_ += two_ki_ * halfey * dt_;
+    integral_fbz_ += two_ki_ * halfez * dt_;
+
+    // apply integral feedback
+    wx += integral_fbx_;
+    wy += integral_fby_;
+    wz += integral_fbz_;
+  }
+  else {
+    // prevent integral windup
+    integral_fbx_ = 0.0f;
+    integral_fby_ = 0.0f;
+    integral_fbz_ = 0.0f;
+  }
+
+  // Apply proportional feedback
+  wx += two_kp_ * halfex;
+  wy += two_kp_ * halfey;
+  wz += two_kp_ * halfez;
+
+  // Integrate rate of change of quaternion
+  // pre-multiply common factors
+  wx *= 0.5f * dt_;
+  wy *= 0.5f * dt_;
+  wz *= 0.5f * dt_;
+
+  float q0 = this->q[0] + (-this->q[1] * wx - this->q[2] * wy - this->q[3] * wz);
+  float q1 = this->q[1] + (this->q[0] * wx + this->q[2] * wz - this->q[3] * wy);
+  float q2 = this->q[2] + (this->q[0] * wy - this->q[1] * wz + this->q[3] * wx);
+  float q3 = this->q[3] + (this->q[0] * wz + this->q[1] * wy - this->q[2] * wx);
+
+  this->q_last[0] = this->q[0];
+  this->q_last[1] = this->q[1];
+  this->q_last[2] = this->q[2];
+  this->q_last[3] = this->q[3];
+
+  // Normalise quaternion
+  norm = 1.0f / std::sqrt(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3);
+  this->q[0] = q0 * norm;
+  this->q[1] = q1 * norm;
+  this->q[2] = q2 * norm;
+  this->q[3] = q3 * norm;
+
+  //只是用到了1=q[0]^2+q[1]^2+q[2]^2+q[3]^2这个关系简化了一些计算
+  //以后的同学在用ai理解mahony算法的时候会更容易,形式更加相同
+  //之后要加万向锁保护  ,我的理想是加根据历史记录进行保护
+  this->yaw = std::atan2(
+    2.0f * (this->q[0] * this->q[3] + this->q[1] * this->q[2]),
+    1.0f - 2.0f * (this->q[2] * this->q[2] + this->q[3] * this->q[3]));
+  this->pitch = std::asin(2.0f * (this->q[0] * this->q[2] - this->q[1] * this->q[3]));
+  this->roll = std::atan2(
+    2.0f * (this->q[0] * this->q[1] + this->q[2] * this->q[3]),
+    1.0f - 2.0f * (this->q[1] * this->q[1] + this->q[2] * this->q[2]));
+
+  //计算欧拉角变化率
+  culculate_yaw_pitch_roll_rates(gx, gy, gz, this->roll, this->pitch, this->yaw);
+
+  //将pitch进行值域扩充,解决串腿翻倒后自启问题
+  pitch_geom_calc();
+}
+
+void Mahony::culculate_yaw_pitch_roll_rates(
+  float wx, float wy, float wz, float roll, float pitch, float yaw)
+{
+  this->vroll = wx + wy * std::sin(roll) * std::tan(pitch) + wz * std::cos(roll) * std::tan(pitch);
+  this->vpitch = wy * std::cos(roll) - wz * std::sin(roll);
+  this->vyaw = wy * std::sin(roll) / std::cos(pitch) + wz * std::cos(roll) / std::cos(pitch);
+}
+
+void Mahony::init(float ax, float ay, float az)
+{
+  float norm = 1.0f / std::sqrt(ax * ax + ay * ay + az * az);
+  ax *= norm;
+  ay *= norm;
+  az *= norm;
+
+  float pitch0 = std::atan2(-ax, az);
+  float roll0 = std::atan2(ay, az);
+  float yaw0 = 0.0f;
+  // 需要注意的是:上电后在确定底盘相对于地面的初始yaw值的时候 要在mahony的init阶段直接将yaw_relative_angle赋值给底盘系imu的yaw0(正负自己确定)!!!
+
+  float cr2 = std::cos(roll0 * 0.5f);
+  float cp2 = std::cos(pitch0 * 0.5f);
+  float cy2 = std::cos(yaw0 * 0.5f);
+  float sr2 = std::sin(roll0 * 0.5f);
+  float sp2 = std::sin(pitch0 * 0.5f);
+  float sy2 = std::sin(yaw0 * 0.5f);
+
+  float q0 = cr2 * cp2 * cy2 + sr2 * sp2 * sy2;
+  float q1 = sr2 * cp2 * cy2 - cr2 * sp2 * sy2;
+  float q2 = cr2 * sp2 * cy2 + sr2 * cp2 * sy2;
+  float q3 = cr2 * cp2 * sy2 - sr2 * sp2 * cy2;
+
+  norm = 1.0f / std::sqrt(q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3);
+  this->q[0] = q0 * norm;
+  this->q[1] = q1 * norm;
+  this->q[2] = q2 * norm;
+  this->q[3] = q3 * norm;
+
+  this->yaw = yaw0;
+  this->pitch = pitch0;
+  this->roll = roll0;
+}
+
+void Mahony::pitch_geom_calc()
+{
+  this->pitch_geom_last = this->pitch_geom;
+
+  quaternion_frame_transform_for_mahony(
+    this->q, this->base_x, this->world_x, false);  //将base系的x轴转换到world系
+  quaternion_frame_transform_for_mahony(
+    this->q, this->base_z, this->world_z, false);  //将base系的z轴转换到world系
+
+  float pitch_init = std::asin(
+    -world_x[2]);  //初始pitch角度(云台x轴在world系下的投影与world系xy平面的夹角)(低头为正)
+
+  //接下来结合z轴判断pitch角度的象限
+  if (world_z[2] >= 0.0f) {
+    this->pitch_geom = pitch_init;
+  }
+  else {
+    if (world_x[2] >= 0.0f) {
+      this->pitch_geom = -M_PI - pitch_init;  //抬头倒扣
+    }
+    else {
+      this->pitch_geom = M_PI - pitch_init;  //低头倒扣
+    }  //这里仍然避免不了+-2pi的跳变,这就没关系了,至少我们先把值域扩展到了+-pi
+  }
+
+  // 计算几何pitch角及其微分
+  this->vpitch_geom = (this->pitch_geom - this->pitch_geom_last) / dt_;
+}
+
+void Mahony::set_kp(float kp) { this->two_kp_ = 2.0f * kp; }
+
+void Mahony::set_ki(float ki) { this->two_ki_ = 2.0f * ki; }
+
+//专门给mahony写的四元数换系,以免老是引用gimbal类
+// 四元数坐标变换：v_out = q ⊗ v_in ⊗ q*
+// 输入：q[4] = {w, x, y, z} 表示从坐标系A到坐标系B的旋转
+//      v_in[3] = {x, y, z} 在坐标系B中的同一个向量的坐标
+// 输出：v_out[3] = {x, y, z} 在坐标系A中的同一个向量的坐标向量
+// conjugate_q: 是否对 q 取共轭（true 时使用 q* 而不是 q，相当于反向旋转）
+// 注意：这是 passive rotation（坐标系变换），不是 active rotation（向量旋转）
+void Mahony::quaternion_frame_transform_for_mahony(
+  const float q[4], const float v_in[3], float v_out[3], bool conjugate_q)
+{
+  // 根据 conjugate 标志决定四元数的符号
+  float w = q[0];
+  float x = conjugate_q ? -q[1] : q[1];
+  float y = conjugate_q ? -q[2] : q[2];
+  float z = conjugate_q ? -q[3] : q[3];
+
+  float vx = v_in[0], vy = v_in[1], vz = v_in[2];
+
+  // 优化的四元数-向量旋转公式（避免构造完整四元数）
+  // v_out = v_in + 2 * cross(q_vec, cross(q_vec, v_in) + w * v_in)
+
+  // 第一步：t = cross(q_vec, v_in) = q_vec × v_in
+  float tx = y * vz - z * vy;
+  float ty = z * vx - x * vz;
+  float tz = x * vy - y * vx;
+
+  // 第二步：t = t + w * v_in
+  tx += w * vx;
+  ty += w * vy;
+  tz += w * vz;
+
+  // 第三步：v_out = v_in + 2 * cross(q_vec, t)
+  v_out[0] = vx + 2.0f * (y * tz - z * ty);
+  v_out[1] = vy + 2.0f * (z * tx - x * tz);
+  v_out[2] = vz + 2.0f * (x * ty - y * tx);
+}
+
+}  // namespace sp

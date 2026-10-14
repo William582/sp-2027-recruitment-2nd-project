@@ -1,0 +1,48 @@
+#ifndef SP__SUPERCAP_HPP
+#define SP__SUPERCAP_HPP
+
+#include <cstdint>
+
+namespace sp
+{
+enum class SuperCapMode
+{
+  AUTOMODE = 0x00,     // 自动模式（默认）
+  DISOUTPUT,           // 只充不放
+  DISCHARGE,           // 只放不充
+  DISCHARGE_DISOUTPUT  // 不充不放
+};
+
+class SuperCap
+{
+public:
+  const uint16_t tx_id = 0x300;             // 超级电容和缓冲电容控制帧ID
+  const uint16_t super_cap_rx_id = 0x301;   // 超级电容反馈帧ID
+  const uint16_t buffer_cap_rx_id = 0x302;  // 缓冲电容反馈帧ID
+
+  float power_in;   // 电管输出
+  float power_out;  // 电容组充电功率
+  float voltage;    // 电容电压（放到3V，然后3v->6V后可再次放电）
+
+  uint8_t temperature;  // 温度(现阶段恒定为25)
+  uint8_t status;       // 状态标志位（现阶段保留为0x10）
+
+  float cap_energy;
+
+  SuperCap(SuperCapMode mode_ = SuperCapMode::AUTOMODE, float capacitance = 4.4f);
+
+  bool is_alive(uint32_t now_ms) const;
+
+  void read(uint8_t * data, uint32_t stamp_ms);
+  void write(uint8_t * data, uint16_t power_limit, uint16_t buffer_energy, uint8_t chassis_output);
+
+private:
+  SuperCapMode mode_;
+  float capacitance_;  // 电容容量
+
+  uint32_t last_read_ms_;  // 上一次读取数据的时间戳
+};
+
+}  // namespace sp
+
+#endif  // IO_SUPERCAP_HPP

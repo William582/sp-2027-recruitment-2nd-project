@@ -1,0 +1,192 @@
+#ifndef SP__VT03_HPP
+#define SP__VT03_HPP
+
+#include <array>
+#include <cstring>
+
+#include "referee/referee_protocol/referee_protocol.hpp"
+#include "usart.h"
+
+namespace sp
+{
+
+constexpr uint16_t VT03_KEY_W_MASK = 0x0001;
+constexpr uint16_t VT03_KEY_S_MASK = 0x0002;
+constexpr uint16_t VT03_KEY_A_MASK = 0x0004;
+constexpr uint16_t VT03_KEY_D_MASK = 0x0008;
+constexpr uint16_t VT03_KEY_SHIFT_MASK = 0x0010;
+constexpr uint16_t VT03_KEY_CTRL_MASK = 0x0020;
+constexpr uint16_t VT03_KEY_Q_MASK = 0x0040;
+constexpr uint16_t VT03_KEY_E_MASK = 0x0080;
+constexpr uint16_t VT03_KEY_R_MASK = 0x0100;
+constexpr uint16_t VT03_KEY_F_MASK = 0x0200;
+constexpr uint16_t VT03_KEY_G_MASK = 0x0400;
+constexpr uint16_t VT03_KEY_Z_MASK = 0x0800;
+constexpr uint16_t VT03_KEY_X_MASK = 0x1000;
+constexpr uint16_t VT03_KEY_C_MASK = 0x2000;
+constexpr uint16_t VT03_KEY_V_MASK = 0x4000;
+constexpr uint16_t VT03_KEY_B_MASK = 0x8000;
+
+struct __attribute__((packed)) RefereeCustomData
+{
+  float j0 = 0.0f;
+  float j1 = 0.0f;
+  float j2 = 0.0f;
+  float j3 = 0.0f;
+  float j4 = 0.0f;
+  float j5 = 0.0f;
+  uint8_t reserved[6];  //保留位
+};
+
+struct __attribute__((packed)) RefereeRobotData
+{
+  float mode = 0.0f;
+  float j0_pos = 0.0f;
+  float j1_pos = 0.0f;
+  float j2_pos = 0.0f;
+  float j0_vel = 0.0f;
+  float j1_vel = 0.0f;
+  float j2_vel = 0.0f;
+  uint8_t reserved[2];  //保留位 2位
+};
+
+static_assert(sizeof(RefereeCustomData) == sizeof(referee::CustomRobotData));
+
+struct __attribute__((packed)) VT03RemoteData
+{
+  uint8_t sof_1;
+  uint8_t sof_2;
+  uint64_t ch_0 : 11;
+  uint64_t ch_1 : 11;
+  uint64_t ch_2 : 11;
+  uint64_t ch_3 : 11;
+  uint64_t mode_sw : 2;
+  uint64_t pause : 1;
+  uint64_t fn_1 : 1;
+  uint64_t fn_2 : 1;
+  uint64_t wheel : 11;
+  uint64_t trigger : 1;
+  uint64_t padding1 : 3;
+
+  int16_t mouse_x;
+  int16_t mouse_y;
+  int16_t mouse_z;
+
+  uint8_t mouse_left : 2;
+  uint8_t mouse_right : 2;
+  uint8_t mouse_middle : 2;
+  uint8_t padding2 : 2;
+
+  uint16_t keys;
+  uint16_t crc16;
+};
+
+enum class VT03Mode
+{
+  C,
+  N,
+  S
+};
+
+struct VT03MouseData
+{
+  float vx;  // 取值范围: [-1, 1]
+  float vy;  // 取值范围: [-1, 1]
+  float vs;  // 取值范围: [-1, 1], 鼠标滚轮, s代表scroll
+  bool left;
+  bool middle;  //中键
+  bool right;
+};
+
+struct __attribute__((packed)) VT03KeysData
+{
+  bool w;
+  bool s;
+  bool a;
+  bool d;
+  bool shift;
+  bool ctrl;
+  bool q;
+  bool e;
+  bool r;
+  bool f;
+  bool g;
+  bool z;
+  bool x;
+  bool c;
+  bool v;
+  bool b;
+};
+
+struct __attribute__((packed)) CustomByteBlock
+{
+  uint8_t padding[300];
+};
+
+static_assert(sizeof(CustomByteBlock) == 300, "CustomByteBlock MUST be exactly 300 bytes!");
+
+struct VT03CustomClientData
+{
+  std::array<uint8_t, 30> data{};
+  uint8_t size = 0;
+  bool is_valid = false;
+};
+
+class VT03
+{
+public:
+  VT03(UART_HandleTypeDef * huart, bool use_dma = true);
+  UART_HandleTypeDef * huart;
+
+  VT03Mode mode;  // 只读! 档位切换开关
+  float ch_rh;    // 只读! 右水平摇杆, 取值范围: [-1, 1], 右正左负
+  float ch_rv;    // 只读! 右垂直摇杆, 取值范围: [-1, 1], 上正下负
+  float ch_lh;    // 只读! 左水平摇杆, 取值范围: [-1, 1], 右正左负
+  float ch_lv;    // 只读! 左垂直摇杆, 取值范围: [-1, 1], 上正下负
+  float wheel;    // 只读! 左上方拨轮, 取值范围: [-1, 1], 右正左负
+  bool fn_l;      // 只读! 左自定义按键
+  bool fn_r;      // 只读! 右自定义按键
+  bool pause;     // 只读! 暂停按键
+  bool trigger;   // 只读! 扳机按键
+
+  RefereeCustomData custom;            // 只读! 自定义控制器数据
+  RefereeRobotData robot;              // 只读！机器人向自定义控制器发送数据
+  VT03MouseData mouse;                 // 只读! 鼠标数据
+  VT03KeysData keys;                   // 只读! 键盘数据
+  VT03CustomClientData custom_client;  // 只读! 自定义客户端向机器人发送的数据 0x0311
+
+  uint16_t keyboard_value;  // 只读! 键盘16位原始值
+
+  bool is_open() const;
+  bool is_alive(uint32_t now_ms) const;
+  bool custom_2_robot_is_open() const;
+  bool custom_2_robotis_alive(uint32_t now_ms) const;
+
+  void request();
+  void update(uint16_t size, uint32_t stamp_ms);
+
+  // 发送自定义客户端数据 (0x0310)
+  void send_custom_client_data(const CustomByteBlock & custom_data);
+
+private:
+  const bool use_dma_;
+  std::array<uint8_t, 255> buff_;
+  std::array<std::array<uint8_t, 255>, 2> multi_buff_;
+
+  static constexpr uint32_t RX_BUF_SIZE = 255;
+  static constexpr uint32_t DMA_NDTR_SIZE = RX_BUF_SIZE * 2;
+
+  bool has_read_ = false;
+  uint32_t last_read_ms_;
+  bool custom_2_robot_has_read_ = false;
+  uint32_t custom_2_robot_last_read_ms_;
+
+  uint8_t seq_ = 0;  // 发送序列号，随每次发送递增
+
+  void update(uint8_t * frame_start, uint16_t size, uint32_t stamp_ms);
+  void update_remote(const VT03RemoteData * data);
+};
+
+}  // namespace sp
+
+#endif  // SP__VT03_HPP

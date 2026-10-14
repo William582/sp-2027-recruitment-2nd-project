@@ -1,0 +1,537 @@
+#include "pm02.hpp"
+
+#include <cstring>
+
+#include "tools/crc/crc.hpp"
+
+namespace
+{
+constexpr size_t INTERACTION_HEADER_LEN = 6;
+
+template <typename T>
+void copy_fixed(T & dst, const uint8_t * data, size_t size)
+{
+  // 固定长度协议帧必须和结构体大小一致，避免异常长度导致 memcpy 越界。
+  if (size != sizeof(T)) return;
+  std::memcpy(&dst, data, sizeof(T));
+}
+
+uint16_t read_u16_le(const uint8_t * data)
+{
+  return static_cast<uint16_t>(data[0]) | (static_cast<uint16_t>(data[1]) << 8U);
+}
+
+template <typename T>
+T value_or_default(T value, uint32_t default_value)
+{
+  return value == static_cast<T>(-1) ? static_cast<T>(default_value) : value;
+}
+
+sp::referee::RadarEnemyDartWarning default_radar_enemy_dart_warning()
+{
+  return {};
+}
+
+sp::referee::RadarAerialCountered default_radar_aerial_countered()
+{
+  return {};
+}
+
+sp::referee::RadarSentryPosition default_radar_position()
+{
+  return {};
+}
+
+sp::referee::RadarAllyHp default_radar_hp()
+{
+  sp::referee::RadarAllyHp data{};
+  data.hero_hp = 999U;
+  data.engineer_hp = 999U;
+  data.infantry3_hp = 999U;
+  data.infantry4_hp = 999U;
+  data.sentry_hp = 999U;
+  return data;
+}
+
+sp::referee::RadarAllyAmmo default_radar_ammo()
+{
+  sp::referee::RadarAllyAmmo data{};
+  data.hero_ammo = 999U;
+  data.infantry3_ammo = 999U;
+  data.infantry4_ammo = 999U;
+  data.aerial_ammo = 999U;
+  data.sentry_ammo = 999U;
+  return data;
+}
+
+sp::referee::RadarAllyField default_radar_field()
+{
+  sp::referee::RadarAllyField data{};
+  data.remain_coins = 9999U;
+  data.total_coins = 9999U;
+  data.status_flags = 0U;
+  return data;
+}
+
+sp::referee::RadarBuffStatus default_radar_buff_status()
+{
+  sp::referee::RadarBuffStatus data{};
+  data.sentry_posture = 3U;
+  return data;
+}
+
+void normalize_radar_position(sp::referee::RadarSentryPosition & data)
+{
+  data.source = value_or_default(data.source, 0U);
+  data.hero_x = value_or_default(data.hero_x, 0);
+  data.hero_y = value_or_default(data.hero_y, 0);
+  data.engineer_x = value_or_default(data.engineer_x, 0);
+  data.engineer_y = value_or_default(data.engineer_y, 0);
+  data.infantry3_x = value_or_default(data.infantry3_x, 0);
+  data.infantry3_y = value_or_default(data.infantry3_y, 0);
+  data.infantry4_x = value_or_default(data.infantry4_x, 0);
+  data.infantry4_y = value_or_default(data.infantry4_y, 0);
+  data.aerial_x = value_or_default(data.aerial_x, 0);
+  data.aerial_y = value_or_default(data.aerial_y, 0);
+  data.sentry_x = value_or_default(data.sentry_x, 0);
+  data.sentry_y = value_or_default(data.sentry_y, 0);
+}
+
+void normalize_radar_hp(sp::referee::RadarAllyHp & data)
+{
+  data.hero_hp = value_or_default(data.hero_hp, 999U);
+  data.engineer_hp = value_or_default(data.engineer_hp, 999U);
+  data.infantry3_hp = value_or_default(data.infantry3_hp, 999U);
+  data.infantry4_hp = value_or_default(data.infantry4_hp, 999U);
+  data.sentry_hp = value_or_default(data.sentry_hp, 999U);
+}
+
+void normalize_radar_ammo(sp::referee::RadarAllyAmmo & data)
+{
+  data.hero_ammo = value_or_default(data.hero_ammo, 999U);
+  data.infantry3_ammo = value_or_default(data.infantry3_ammo, 999U);
+  data.infantry4_ammo = value_or_default(data.infantry4_ammo, 999U);
+  data.aerial_ammo = value_or_default(data.aerial_ammo, 999U);
+  data.sentry_ammo = value_or_default(data.sentry_ammo, 999U);
+}
+
+void normalize_radar_field(sp::referee::RadarAllyField & data)
+{
+  data.remain_coins = value_or_default(data.remain_coins, 9999U);
+  data.total_coins = value_or_default(data.total_coins, 9999U);
+  data.status_flags = value_or_default(data.status_flags, 0U);
+}
+
+void normalize_radar_buff_status(sp::referee::RadarBuffStatus & data)
+{
+  data.hero_heal = value_or_default(data.hero_heal, 0U);
+  data.hero_cool = value_or_default(data.hero_cool, 0U);
+  data.hero_def = value_or_default(data.hero_def, 0U);
+  data.hero_vuln = value_or_default(data.hero_vuln, 0U);
+  data.hero_atk = value_or_default(data.hero_atk, 0U);
+  data.engineer_heal = value_or_default(data.engineer_heal, 0U);
+  data.engineer_cool = value_or_default(data.engineer_cool, 0U);
+  data.engineer_def = value_or_default(data.engineer_def, 0U);
+  data.engineer_vuln = value_or_default(data.engineer_vuln, 0U);
+  data.engineer_atk = value_or_default(data.engineer_atk, 0U);
+  data.infantry3_heal = value_or_default(data.infantry3_heal, 0U);
+  data.infantry3_cool = value_or_default(data.infantry3_cool, 0U);
+  data.infantry3_def = value_or_default(data.infantry3_def, 0U);
+  data.infantry3_vuln = value_or_default(data.infantry3_vuln, 0U);
+  data.infantry3_atk = value_or_default(data.infantry3_atk, 0U);
+  data.infantry4_heal = value_or_default(data.infantry4_heal, 0U);
+  data.infantry4_cool = value_or_default(data.infantry4_cool, 0U);
+  data.infantry4_def = value_or_default(data.infantry4_def, 0U);
+  data.infantry4_vuln = value_or_default(data.infantry4_vuln, 0U);
+  data.infantry4_atk = value_or_default(data.infantry4_atk, 0U);
+  data.sentry_heal = value_or_default(data.sentry_heal, 0U);
+  data.sentry_cool = value_or_default(data.sentry_cool, 0U);
+  data.sentry_def = value_or_default(data.sentry_def, 0U);
+  data.sentry_vuln = value_or_default(data.sentry_vuln, 0U);
+  data.sentry_atk = value_or_default(data.sentry_atk, 0U);
+  data.sentry_posture = value_or_default(data.sentry_posture, 3U);
+  data.hero_status = value_or_default(data.hero_status, 0U);
+  data.engineer_status = value_or_default(data.engineer_status, 0U);
+  data.infantry3_status = value_or_default(data.infantry3_status, 0U);
+  data.infantry4_status = value_or_default(data.infantry4_status, 0U);
+  data.sentry_status = value_or_default(data.sentry_status, 0U);
+}
+
+}  // namespace
+
+namespace sp
+{
+PM02::PM02(UART_HandleTypeDef * huart, bool use_dma) : huart(huart), use_dma_(use_dma)
+{
+  uint8_t * start = reinterpret_cast<uint8_t *>(&this->game_status);
+  uint8_t * end = reinterpret_cast<uint8_t *>(&this->custom_info) + sizeof(this->custom_info);
+  if (end > start) {
+    std::memset(start, 0, static_cast<size_t>(end - start));
+  }
+
+  std::memset(this->buff_, 0, sizeof(this->buff_));
+  for (auto & mb : this->multi_buff_) {
+    std::memset(mb.data(), 0, mb.size());
+  }
+
+  this->radar_enemy_dart_warning = default_radar_enemy_dart_warning();
+  this->radar_aerial_countered = default_radar_aerial_countered();
+  this->enemy_robot_position = default_radar_position();
+  this->radar_ally_hp = default_radar_hp();
+  this->radar_ally_ammo = default_radar_ammo();
+  this->radar_ally_field = default_radar_field();
+  this->radar_buff_status = default_radar_buff_status();
+}
+
+void PM02::request()
+{
+  if (use_dma_) {
+    // dismiss return
+    HAL_UARTEx_ReceiveToIdle_DMA(this->huart, buff_, PM02_BUFF_SIZE);
+
+    // ref: https://github.com/HNUYueLuRM/basic_framework/blob/master/bsp/usart/bsp_usart.c
+    __HAL_DMA_DISABLE_IT(this->huart->hdmarx, DMA_IT_HT);
+  }
+  else {
+    // dismiss return
+    HAL_UARTEx_ReceiveToIdle_IT(this->huart, buff_, PM02_BUFF_SIZE);
+  }
+}
+
+void PM02::update(uint16_t size)
+{
+  update_radar_data_timeout(HAL_GetTick());
+  update(buff_, size);
+}
+
+void PM02::update(uint8_t * frame_start, uint16_t size)
+{
+  if (size < referee::HEAD_LEN) return;
+  if (frame_start[0] != referee::SOF) return;
+  if (!check_crc8(frame_start, referee::HEAD_LEN)) return;
+
+  size_t data_len = (frame_start[2] << 8) | frame_start[1];
+  size_t frame_len = referee::HEAD_LEN + referee::CMD_ID_LEN + data_len + referee::TAIL_LEN;
+
+  if (frame_len > PM02_BUFF_SIZE) return;
+  if (size < frame_len) return;
+  if (!check_crc16(frame_start, frame_len)) return;
+
+  uint16_t cmd_id = (frame_start[6] << 8) | frame_start[5];
+  const uint8_t * data = frame_start + referee::DATA_START;
+
+  switch (cmd_id) {
+    // 0x0001 比赛状态数据
+    case referee::cmd_id::GAME_STATUS:
+      copy_fixed(this->game_status, data, data_len);
+      break;
+    // 0x0002 比赛结果数据
+    case referee::cmd_id::GAME_RESULT:
+      copy_fixed(this->game_result, data, data_len);
+      break;
+    // 0x0003 比赛机器人血量数据
+    case referee::cmd_id::GAME_ROBOT_HP:
+      copy_fixed(this->game_robot_hp, data, data_len);
+      break;
+    // 0x0101 场地事件数据
+    case referee::cmd_id::EVENT_DATA:
+      copy_fixed(this->event, data, data_len);
+      break;
+    // 0x0104 裁判警告数据
+    case referee::cmd_id::REFEREE_WARNING:
+      copy_fixed(this->referee_warning, data, data_len);
+      break;
+    // 0x0105 飞镖发射相关数据
+    case referee::cmd_id::DART_INFO:
+      copy_fixed(this->dart_info, data, data_len);
+      break;
+    // 0x0201 机器人状态数据
+    case referee::cmd_id::ROBOT_STATUS:
+      copy_fixed(this->robot_status, data, data_len);
+      break;
+    // 0x0202 实时底盘缓冲能量和射击热量数据
+    case referee::cmd_id::POWER_HEAT_DATA:
+      copy_fixed(this->power_heat, data, data_len);
+      break;
+    // 0x0203 机器人位置数据
+    case referee::cmd_id::ROBOT_POS:
+      copy_fixed(this->robot_pos, data, data_len);
+      break;
+    // 0x0204 机器人增益数据
+    case referee::cmd_id::BUFF:
+      copy_fixed(this->buff, data, data_len);
+      break;
+    // 没有 0x0205
+    // 0x0206 伤害状态数据
+    case referee::cmd_id::HURT_DATA:
+      copy_fixed(this->hurt, data, data_len);
+      break;
+    // 0x0207 实时射击数据
+    case referee::cmd_id::SHOOT_DATA:
+      copy_fixed(this->shoot, data, data_len);
+      break;
+    // 0x0208 允许发弹量数据
+    case referee::cmd_id::PROJECTILE_ALLOWANCE:
+      copy_fixed(this->projectile_allowance, data, data_len);
+      break;
+    // 0x0209 机器人 RFID 模块状态
+    case referee::cmd_id::RFID_STATUS:
+      copy_fixed(this->rfid_status, data, data_len);
+      break;
+    // 0x020A 飞镖选手端指令数据
+    case referee::cmd_id::DART_CLIENT_CMD:
+      copy_fixed(this->dart_client_cmd, data, data_len);
+      break;
+    // 0x020B 地面机器人位置数据
+    case referee::cmd_id::GROUND_ROBOT_POSITION:
+      copy_fixed(this->ground_robot_pos, data, data_len);
+      break;
+    // 0x020C 雷达标记进度数据
+    case referee::cmd_id::RADAR_MARK_DATA:
+      copy_fixed(this->radar_mark, data, data_len);
+      break;
+    // 0x020D 哨兵自主决策信息同步
+    case referee::cmd_id::SENTRY_INFO:
+      copy_fixed(this->sentry_info, data, data_len);
+      break;
+    // 0x020E 雷达自主决策信息同步
+    case referee::cmd_id::RADAR_INFO:
+      copy_fixed(this->radar_info, data, data_len);
+      break;
+    // 0x0A05 雷达站增益点状态数据（雷达侧可据此生成无敌掩码）
+    case referee::cmd_id::RADAR_BUFF_STATUS:
+      if (data_len == sizeof(this->radar_buff_status)) {
+        referee::RadarBuffStatus received{};
+        std::memcpy(&received, data, sizeof(received));
+        normalize_radar_buff_status(received);
+        this->radar_buff_status = received;
+        this->radar_buff_status_valid = true;
+        this->radar_buff_status_last_update_ms = HAL_GetTick();
+      }
+      else {
+        this->radar_buff_status = default_radar_buff_status();
+        this->radar_buff_status_valid = false;
+      }
+      break;
+    // 0x0301 雷达自定义子编码：0x0210~0x0213。
+    case referee::cmd_id::ROBOT_INTERACTION_DATA: {
+      if (data_len < INTERACTION_HEADER_LEN) break;
+
+      const uint16_t data_cmd_id = read_u16_le(data);
+      const uint16_t receiver_id = read_u16_le(data + 4);
+
+      if (receiver_id != this->robot_status.robot_id) break;
+
+      const uint8_t * payload = data + INTERACTION_HEADER_LEN;
+      const size_t payload_len = data_len - INTERACTION_HEADER_LEN;
+      const uint32_t now_ms = HAL_GetTick();
+
+      switch (data_cmd_id) {
+        case referee::data_cmd_id::RADAR_ENEMY_DART_WARNING_CMD:
+          this->radar_enemy_dart_warning_valid = false;
+          if (payload_len == sizeof(referee::RadarEnemyDartWarning)) {
+            referee::RadarEnemyDartWarning received{};
+            std::memcpy(&received, payload, sizeof(received));
+            received.dart_gate_status = value_or_default(received.dart_gate_status, 0U);
+            this->radar_enemy_dart_warning = received;
+            this->radar_enemy_dart_warning_valid = true;
+            this->radar_enemy_dart_warning_last_update_ms = now_ms;
+          }
+          else {
+            this->radar_enemy_dart_warning = default_radar_enemy_dart_warning();
+          }
+          break;
+
+        case referee::data_cmd_id::RADAR_SENTRY_POSITION_CMD:
+          this->enemy_robot_position_valid = false;
+          if (payload_len == sizeof(referee::RadarSentryPosition)) {
+            referee::RadarSentryPosition received{};
+            std::memcpy(&received, payload, sizeof(received));
+            normalize_radar_position(received);
+            this->enemy_robot_position = received;
+            this->enemy_robot_position_valid = true;
+            this->enemy_robot_position_last_update_ms = now_ms;
+          }
+          else {
+            this->enemy_robot_position = default_radar_position();
+          }
+          break;
+
+        case referee::data_cmd_id::RADAR_COMBINED_DATA_CMD:
+          this->radar_ally_hp_valid = false;
+          this->radar_ally_ammo_valid = false;
+          this->radar_ally_field_valid = false;
+          this->radar_buff_status_valid = false;
+          if (payload_len == sizeof(referee::RadarCombinedData)) {
+            referee::RadarCombinedData received{};
+            std::memcpy(&received, payload, sizeof(received));
+
+            // 0x0212 的四组数据分别清洗。某组或某字段为全 1 时，
+            // 只替换对应字段，不影响同一帧中其他正确数据。
+            normalize_radar_hp(received.hp);
+            normalize_radar_ammo(received.ammo);
+            normalize_radar_field(received.field);
+            normalize_radar_buff_status(received.buff);
+
+            this->radar_ally_hp = received.hp;
+            this->radar_ally_ammo = received.ammo;
+            this->radar_ally_field = received.field;
+            this->radar_buff_status = received.buff;
+
+            this->radar_ally_hp_valid = true;
+            this->radar_ally_ammo_valid = true;
+            this->radar_ally_field_valid = true;
+            this->radar_buff_status_valid = true;
+
+            this->radar_ally_hp_last_update_ms = now_ms;
+            this->radar_ally_ammo_last_update_ms = now_ms;
+            this->radar_ally_field_last_update_ms = now_ms;
+            this->radar_buff_status_last_update_ms = now_ms;
+          }
+          else {
+            this->radar_ally_hp = default_radar_hp();
+            this->radar_ally_ammo = default_radar_ammo();
+            this->radar_ally_field = default_radar_field();
+            this->radar_buff_status = default_radar_buff_status();
+          }
+          break;
+
+        case referee::data_cmd_id::RADAR_AERIAL_COUNTERED_CMD:
+          this->radar_aerial_countered_valid = false;
+          if (payload_len == sizeof(referee::RadarAerialCountered)) {
+            referee::RadarAerialCountered received{};
+            std::memcpy(&received, payload, sizeof(received));
+            received.aerial_countered = value_or_default(received.aerial_countered, 0U);
+            this->radar_aerial_countered = received;
+            this->radar_aerial_countered_valid = true;
+            this->radar_aerial_countered_last_update_ms = now_ms;
+          }
+          else {
+            this->radar_aerial_countered = default_radar_aerial_countered();
+          }
+          break;
+
+        default:
+          break;
+      }
+      break;
+    }
+    // 0x0303 选手端小地图交互数据
+    case referee::cmd_id::MAP_COMMAND:
+      copy_fixed(this->map_command, data, data_len);
+      break;
+    // 0x0305 选手端小地图接收雷达数据
+    case referee::cmd_id::MAP_ROBOT_DATA:
+      copy_fixed(this->map_robot_data, data, data_len);
+      break;
+    // 0x0306 自定义控制器与选手端交互数据
+    // case referee::cmd_id::CUSTOM_CLIENT_DATA:
+    //   copy_fixed(this->custom_client_data, data, data_len);
+    //   break;
+    // 0x0307 选手端小地图接收哨兵数据
+    case referee::cmd_id::MAP_DATA:
+      copy_fixed(this->map_data, data, data_len);
+      break;
+    // 0x0308 选手端小地图接收机器人数据
+    case referee::cmd_id::CUSTOM_INFO:
+      copy_fixed(this->custom_info, data, data_len);
+      break;
+    default:
+      break;
+  }
+
+  // 递归解析，因为缓冲区中可能包含多帧裁判系统的数据。
+  update(frame_start + frame_len, size - frame_len);
+}
+
+HAL_StatusTypeDef PM02::send(const uint8_t * data, size_t size)
+{
+  if (use_dma_) {
+    return HAL_UART_Transmit_DMA(this->huart, data, size);
+  }
+
+  return HAL_UART_Transmit(this->huart, data, size, 0xFF);
+}
+
+void PM02::update_radar_data_timeout(uint32_t now_ms, uint32_t timeout_ms)
+{
+  if (!radar_enemy_dart_warning_fresh(now_ms, timeout_ms)) {
+    this->radar_enemy_dart_warning = default_radar_enemy_dart_warning();
+    this->radar_enemy_dart_warning_valid = false;
+  }
+
+  if (!radar_aerial_countered_fresh(now_ms, timeout_ms)) {
+    this->radar_aerial_countered = default_radar_aerial_countered();
+    this->radar_aerial_countered_valid = false;
+  }
+
+  if (!enemy_robot_position_fresh(now_ms, timeout_ms)) {
+    this->enemy_robot_position = default_radar_position();
+    this->enemy_robot_position_valid = false;
+  }
+
+  if (!radar_ally_hp_fresh(now_ms, timeout_ms)) {
+    this->radar_ally_hp = default_radar_hp();
+    this->radar_ally_hp_valid = false;
+  }
+
+  if (!radar_ally_ammo_fresh(now_ms, timeout_ms)) {
+    this->radar_ally_ammo = default_radar_ammo();
+    this->radar_ally_ammo_valid = false;
+  }
+
+  if (!radar_ally_field_fresh(now_ms, timeout_ms)) {
+    this->radar_ally_field = default_radar_field();
+    this->radar_ally_field_valid = false;
+  }
+
+  if (!radar_buff_status_fresh(now_ms, timeout_ms)) {
+    this->radar_buff_status = default_radar_buff_status();
+    this->radar_buff_status_valid = false;
+  }
+}
+
+bool PM02::radar_enemy_dart_warning_fresh(uint32_t now_ms, uint32_t timeout_ms) const
+{
+  return this->radar_enemy_dart_warning_valid &&
+         static_cast<uint32_t>(now_ms - this->radar_enemy_dart_warning_last_update_ms) <=
+           timeout_ms;
+}
+
+bool PM02::radar_aerial_countered_fresh(uint32_t now_ms, uint32_t timeout_ms) const
+{
+  return this->radar_aerial_countered_valid &&
+         static_cast<uint32_t>(now_ms - this->radar_aerial_countered_last_update_ms) <= timeout_ms;
+}
+
+bool PM02::enemy_robot_position_fresh(uint32_t now_ms, uint32_t timeout_ms) const
+{
+  return this->enemy_robot_position_valid &&
+         static_cast<uint32_t>(now_ms - this->enemy_robot_position_last_update_ms) <= timeout_ms;
+}
+
+bool PM02::radar_ally_hp_fresh(uint32_t now_ms, uint32_t timeout_ms) const
+{
+  return this->radar_ally_hp_valid &&
+         static_cast<uint32_t>(now_ms - this->radar_ally_hp_last_update_ms) <= timeout_ms;
+}
+
+bool PM02::radar_ally_ammo_fresh(uint32_t now_ms, uint32_t timeout_ms) const
+{
+  return this->radar_ally_ammo_valid &&
+         static_cast<uint32_t>(now_ms - this->radar_ally_ammo_last_update_ms) <= timeout_ms;
+}
+
+bool PM02::radar_ally_field_fresh(uint32_t now_ms, uint32_t timeout_ms) const
+{
+  return this->radar_ally_field_valid &&
+         static_cast<uint32_t>(now_ms - this->radar_ally_field_last_update_ms) <= timeout_ms;
+}
+
+bool PM02::radar_buff_status_fresh(uint32_t now_ms, uint32_t timeout_ms) const
+{
+  return this->radar_buff_status_valid &&
+         static_cast<uint32_t>(now_ms - this->radar_buff_status_last_update_ms) <= timeout_ms;
+}
+
+}  // namespace sp
