@@ -1,9 +1,9 @@
 #include "cmsis_os.h"
-#include "tim.h"
 #include "io/bmi088/bmi088.hpp"
 #include "io/can/can.hpp"
 #include "io/dbus/dbus.hpp"
 #include "motor/rm_motor/rm_motor.hpp"
+#include "tim.h"
 #include "tools/mahony/mahony.hpp"
 #include "tools/mecanum/mecanum.hpp"
 #include "tools/pid/pid.hpp"
@@ -175,8 +175,9 @@ PIDParameters motor_2_speed_pid_para(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f);
 PIDParameters motor_3_speed_pid_para(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f);
 // 左下电机
 PIDParameters motor_4_speed_pid_para(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f);
-// imu PID(用于控制电机方向，消除误差)
+// imu 位置环 PID
 PIDParameters imu_position_pid_para(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f);
+
 // PID实例化（针对速度环使用动态积分）
 sp::PID motor_1_speed_pid(
   MOTOR_PID_DT, motor_1_speed_pid_para.kp, motor_1_speed_pid_para.ki, motor_1_speed_pid_para.kd,
@@ -202,6 +203,7 @@ sp::PID imu_position_pid(
   MOTOR_PID_DT, imu_position_pid_para.kp, imu_position_pid_para.ki, imu_position_pid_para.kd,
   imu_position_pid_para.max_out, imu_position_pid_para.max_iout, imu_position_pid_para.alpha, true,
   true);  //采用角度控制
+
 // 双环控制函数
 float dual_loop_control(
   sp::PID & position_pid, sp::PID & speed_pid, float target_angle, float actual_angle,
@@ -252,32 +254,45 @@ extern "C" void control_task(void const * argument)
   //启动定时器10，用于IMU加热
   HAL_TIM_PWM_Start(&htim10, TIM_CHANNEL_1);
 
-  // 电机输出力矩
-  float torque_1 = 0.0f;
-  float torque_2 = 0.0f;
-  float torque_3 = 0.0f;
-  float torque_4 = 0.0f;
-
   //限制参数
   const float MAX_TORQUE = 2000.0f;  // 电机最大输出扭矩，单位：mN·m
   const float MAX_SPEED_X = 1.0f;    // 机器人在x方向上的最大速度，单位：m/s
   const float MAX_SPEED_Y = 1.0f;    // 机器人在y方向上的最大速度，单位：m/s
   const float MAX_SPEED_W = 1.0f;    // 机器人绕z轴的额定角速度，单位：rad/s
+  constexpr float WHEEL_TURN_STOP_ANGLE = 10.0f * 2.0f * 3.14159265358979323846f;
+  static bool auto_drive_enabled = false;
+  static bool auto_drive_completed = false;
+  static bool wheel_angle_initialized = false;
+  static float initial_wheel_angle = 0.0f;
+  const float start_yaw = imu.yaw;   // 记录初始偏航角，用于自动直线行驶模式
 
+  // 主循环
   while (true) {
     imu_update();
     read_motor_feedback(osKernelSysTick());
     imu_temp_control(bmi088.temp);
 
+    // 电机输出力矩
+    float torque_1 = 0.0f;
+    float torque_2 = 0.0f;
+    float torque_3 = 0.0f;
+    float torque_4 = 0.0f;
+
+    // 获取遥控器数据
     const sp::DBusSwitchMode right_switch = remote.sw_r;  //获取右拨杆档位
     const float left_stick_vertical = remote.ch_lv;
     const float left_stick_horizontal = remote.ch_lh;  //获取左摇杆水平和垂直方向的值
     const float left_dial = remote.ch_lu;              //获取左拨轮的值
+
     switch (right_switch) {
       // ----------------------------------------------------
       // DOWN：失能模式
       // ----------------------------------------------------
       case sp::DBusSwitchMode::DOWN: {
+        auto_drive_enabled =
+          false;  // 失能模式下，自动直线行驶模式也应被禁用,以防重新进入UP档位时，底盘会继续前进
+        auto_drive_completed = false;
+        wheel_angle_initialized = false;
         torque_1 = 0.0f;
         torque_2 = 0.0f;
         torque_3 = 0.0f;
@@ -291,6 +306,10 @@ extern "C" void control_task(void const * argument)
       // MID：全向移动模式
       // ----------------------------------------------------
       case sp::DBusSwitchMode::MID: {
+        auto_drive_enabled =
+          false;  // 失能模式下，自动直线行驶模式也应被禁用,以防重新进入UP档位时，底盘会继续前进
+        auto_drive_completed = false;
+        wheel_angle_initialized = false;
         constexpr float DIAL_DEADZONE = 0.05f;
         float target_wz = 0.0f;
         if (left_dial > DIAL_DEADZONE) {
@@ -325,10 +344,64 @@ extern "C" void control_task(void const * argument)
       // UP：自动直线行驶模式
       // ----------------------------------------------------
       case sp::DBusSwitchMode::UP: {
+        // 如果方向角度误差过大，调用imu位置环PID计算底盘角速度，进行姿态修正
+        float angle_error = imu.yaw - start_yaw;
+        float correction_wz = 0.0f;
+        const float auto_straight_speed = 1.0f;  // 自动直线行驶的前进速度，单位：m/s
+
+        if (angle_error > 0.1f || angle_error < -0.1f) {
+          // 使用IMU位置环PID计算底盘角速度
+          correction_wz = single_loop_control(imu_position_pid, start_yaw, imu.yaw);
+        }
+
+        // 直线行驶的前置条件：操作者需有一次将左摇杆向上拨至最大位置，否则底盘不会运动
+
+        if (left_stick_vertical >= 0.95f && !auto_drive_completed) {
+          auto_drive_enabled = true;
+        }
+        if (!auto_drive_enabled) {
+          torque_1 = 0.0f;
+          torque_2 = 0.0f;
+          torque_3 = 0.0f;
+          torque_4 = 0.0f;
+
+          clear_control_pids();
+        }
+        else {
+          const float wheel_angle = motor_1.is_open()? record_wheel_angle(motor_1.angle, initial_wheel_angle,wheel_angle_initialized): 0.0f;
+          if (wheel_angle >= WHEEL_TURN_STOP_ANGLE || wheel_angle <= -WHEEL_TURN_STOP_ANGLE) {
+            auto_drive_enabled = false;
+            auto_drive_completed = true;
+            torque_1 = 0.0f;
+            torque_2 = 0.0f;
+            torque_3 = 0.0f;
+            torque_4 = 0.0f;
+            clear_control_pids();
+          }
+          else {
+            // 底盘速度 -> 各轮转速
+            // vx: 前进速度, 单位: m/s ； vy: 左移速度, 单位: m/s ； wz: 大拇指朝上，右手螺旋方向转速, 单位: rad/s(右手系)
+            //根据设定好的前进速度进行各轮的速度解算，
+            //并将IMU位置环PID计算出的角速度作为偏航修正量，传入模型中进行计算
+            mecanum.calc(auto_straight_speed, 0.0f, correction_wz);
+            // 车轮速度环：目标角速度与电机反馈角速度均为减速箱输出轴 rad/s,无需进行减速比换算
+            torque_1 = single_loop_control(motor_1_speed_pid, mecanum.speed_lf, motor_1.speed);
+            torque_2 = single_loop_control(motor_2_speed_pid, mecanum.speed_rf, motor_2.speed);
+            torque_3 = single_loop_control(motor_3_speed_pid, mecanum.speed_rr, motor_3.speed);
+            torque_4 = single_loop_control(motor_4_speed_pid, mecanum.speed_lr, motor_4.speed);
+          }
+        }
+
+        // 实际车轮速度 -> 更新底盘实际速度（可用于监控或后续控制）
+        //这里电机编号遵从中间件左上、右上、右下、左下的顺序排列的，所以在调用update函数时，传入的参数顺序应该是motor_1.speed, motor_4.speed, motor_2.speed, motor_3.speed
+        mecanum.update(motor_1.speed, motor_4.speed, motor_2.speed, motor_3.speed);
         break;
       }
 
       default: {
+        auto_drive_enabled = false;
+        auto_drive_completed = false;
+        wheel_angle_initialized = false;
         torque_1 = 0.0f;
         torque_2 = 0.0f;
         torque_3 = 0.0f;
