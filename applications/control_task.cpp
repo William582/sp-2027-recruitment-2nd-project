@@ -21,9 +21,9 @@ sp::RM_Motor motor_3(3, sp::RM_Motors::M3508, 13.7f, true);
 sp::RM_Motor motor_4(4, sp::RM_Motors::M3508, 13.7f, true);
 // 麦克纳姆轮底盘运动学，尺寸参数暂置为 0，使用前需设置为实际值
 //底盘基本参数
-static float WHEEL_RADIUS = 0.076f;  // 轮子半径，单位：m
-static float HALF_LENGTH = 0.2f;     // 机器人前后轮中心距的一半，单位：m
-static float HALF_WIDTH = 0.2f;      // 机器人左右轮中心距的一半，单位：m
+static float WHEEL_RADIUS = 0.077f;  // 轮子半径，单位：m
+static float HALF_LENGTH = 0.185f;   // 机器人前后轮中心距的一半，单位：m
+static float HALF_WIDTH = 0.165f;    // 机器人左右轮中心距的一半，单位：m
 constexpr float PI = 3.14159265358979323846f;
 sp::Mecanum mecanum(WHEEL_RADIUS, HALF_LENGTH, HALF_WIDTH, false, false, true, true);
 //dt7遥控器
@@ -119,23 +119,24 @@ void send_motor_commands(float torque_1, float torque_2, float torque_3, float t
 
   can1.send(motor_1.tx_id);  // 四个 M3508 共用 0x200 控制帧，统一发送
 }
-// 读取电机反馈
-void read_motor_feedback(uint32_t stamp_ms)
-{
-  while (HAL_CAN_GetRxFifoFillLevel(&hcan1, CAN_RX_FIFO0) > 0) {
-    can1.recv(CAN_RX_FIFO0);
 
-    if (can1.rx_id == motor_1.rx_id) {
-      motor_1.read(can1.rx_data, stamp_ms);
-    }
-    else if (can1.rx_id == motor_2.rx_id) {
-      motor_2.read(can1.rx_data, stamp_ms);
-    }
-    else if (can1.rx_id == motor_3.rx_id) {
-      motor_3.read(can1.rx_data, stamp_ms);
-    }
-    else if (can1.rx_id == motor_4.rx_id) {
-      motor_4.read(can1.rx_data, stamp_ms);
+// 读取电机反馈
+extern "C" void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef * hcan)
+{
+  auto stamp_ms = osKernelSysTick();
+
+  while (HAL_CAN_GetRxFifoFillLevel(hcan, CAN_RX_FIFO0) > 0) {
+    if (hcan == &hcan1) {
+      can1.recv();
+
+      if (can1.rx_id == motor_1.rx_id)
+        motor_1.read(can1.rx_data, stamp_ms);
+      else if (can1.rx_id == motor_2.rx_id)
+        motor_2.read(can1.rx_data, stamp_ms);
+      else if (can1.rx_id == motor_3.rx_id)
+        motor_3.read(can1.rx_data, stamp_ms);
+      else if (can1.rx_id == motor_4.rx_id)
+        motor_4.read(can1.rx_data, stamp_ms);
     }
   }
 }
@@ -158,15 +159,15 @@ struct PIDParameters
   float alpha;
 };
 // 左上电机
-PIDParameters motor_1_speed_pid_para(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f);
+PIDParameters motor_1_speed_pid_para(10.0f, 0.0f, 0.0f, 200.0f, 0.0f, 0.1f);
 // 右上电机
-PIDParameters motor_2_speed_pid_para(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f);
+PIDParameters motor_2_speed_pid_para(10.0f, 0.0f, 0.0f, 200.0f, 0.0f, 0.1f);
 // 右下电机
-PIDParameters motor_3_speed_pid_para(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f);
+PIDParameters motor_3_speed_pid_para(10.0f, 0.0f, 0.0f, 200.0f, 0.0f, 0.1f);
 // 左下电机
-PIDParameters motor_4_speed_pid_para(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f);
+PIDParameters motor_4_speed_pid_para(10.0f, 0.0f, 0.0f, 200.0f, 0.0f, 0.1f);
 // imu 位置环 PID
-PIDParameters imu_position_pid_para(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f);
+PIDParameters imu_position_pid_para(10.0f, 0.0f, 0.0f, 100.0f, 0.0f, 0.1f);
 
 // PID实例化（针对速度环使用动态积分）
 sp::PID motor_1_speed_pid(
@@ -256,8 +257,8 @@ extern "C" void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef * huart, uint16_t 
   }
 }
 // 功率控制参数
-const float K1 = 1.23e-07f;        // 铜损系数
-const float K2 = 1.453e-07f;       // 机械损耗系数
+const float K1 = 2.0f;             // 铜损系数
+const float K2 = 0.01f;            // 机械损耗系数
 const float CONST_POWER = 4.081f;  // 固定损耗
 
 // 底盘功率限制函数
@@ -344,7 +345,8 @@ extern "C" void control_task(void const * argument)
   referee_init();
   //启动定时器10，用于IMU加热
   HAL_TIM_PWM_Start(&htim10, TIM_CHANNEL_1);
-
+  can1.config();
+  can1.start();
   //限制参数
   const float MAX_TORQUE = 2000.0f;  // 电机最大输出扭矩，单位：mN·m
   const float MAX_SPEED_X = 1.0f;    // 机器人在x方向上的最大速度，单位：m/s
@@ -361,7 +363,7 @@ extern "C" void control_task(void const * argument)
   // 主循环
   while (true) {
     imu_update();
-    read_motor_feedback(osKernelSysTick());
+    HAL_CAN_RxFifo0MsgPendingCallback(&hcan1);
     imu_temp_control(bmi088.temp);
 
     // 电机输出力矩
@@ -375,6 +377,9 @@ extern "C" void control_task(void const * argument)
     const float left_stick_vertical = remote.ch_lv;
     const float left_stick_horizontal = remote.ch_lh;  //获取左摇杆水平和垂直方向的值
     const float left_dial = remote.ch_lu;              //获取左拨轮的值
+    bool motor_is_alive =
+      motor_1.is_alive(osKernelSysTick()) && motor_2.is_alive(osKernelSysTick()) &&
+      motor_3.is_alive(osKernelSysTick()) && motor_4.is_alive(osKernelSysTick());
 
     switch (right_switch) {
       // ----------------------------------------------------
