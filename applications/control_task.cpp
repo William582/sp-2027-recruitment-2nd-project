@@ -3,6 +3,7 @@
 #include "io/can/can.hpp"
 #include "io/dbus/dbus.hpp"
 #include "motor/rm_motor/rm_motor.hpp"
+#include "referee/pm02/pm02.hpp"
 #include "tim.h"
 #include "tools/mahony/mahony.hpp"
 #include "tools/mecanum/mecanum.hpp"
@@ -13,16 +14,17 @@
 //can通信
 sp::CAN can1(&hcan1);
 //电机
-//规定，从左上开始，按顺时针方向分别为电机1-4
-sp::RM_Motor motor_1(1, sp::RM_Motors::M3508, sp::M3508_P19);
-sp::RM_Motor motor_2(2, sp::RM_Motors::M3508, sp::M3508_P19);
-sp::RM_Motor motor_3(3, sp::RM_Motors::M3508, sp::M3508_P19);
-sp::RM_Motor motor_4(4, sp::RM_Motors::M3508, sp::M3508_P19);
+//规定，从左上开始，按顺时针方向分别为电机1-4，减速比使用更新后的13.7,使用多圈计数
+sp::RM_Motor motor_1(1, sp::RM_Motors::M3508, 13.7f, true);
+sp::RM_Motor motor_2(2, sp::RM_Motors::M3508, 13.7f, true);
+sp::RM_Motor motor_3(3, sp::RM_Motors::M3508, 13.7f, true);
+sp::RM_Motor motor_4(4, sp::RM_Motors::M3508, 13.7f, true);
 // 麦克纳姆轮底盘运动学，尺寸参数暂置为 0，使用前需设置为实际值
 //底盘基本参数
 static float WHEEL_RADIUS = 0.076f;  // 轮子半径，单位：m
 static float HALF_LENGTH = 0.2f;     // 机器人前后轮中心距的一半，单位：m
 static float HALF_WIDTH = 0.2f;      // 机器人左右轮中心距的一半，单位：m
+constexpr float PI = 3.14159265358979323846f;
 sp::Mecanum mecanum(WHEEL_RADIUS, HALF_LENGTH, HALF_WIDTH, false, false, true, true);
 //dt7遥控器
 sp::DBus remote(&huart3);
@@ -30,6 +32,8 @@ sp::DBus remote(&huart3);
 const float r_ab[3][3] = {{0.0f, -1.0f, 0.0f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}};
 sp::BMI088 bmi088(&hspi1, GPIOA, GPIO_PIN_4, GPIOB, GPIO_PIN_0, r_ab);
 sp::Mahony imu(1e-3f);
+// referee
+sp::PM02 pm02(&huart6);
 // ============================================================
 //2.imu初始化
 // ============================================================
@@ -88,21 +92,7 @@ void imu_temp_control(float temp)
 // ============================================================
 //遥控器初始化函数
 void remote_init() { remote.request(); }
-// 遥控器接收回调函数
-extern "C" void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef * huart, uint16_t size)
-{
-  if (huart == &huart3) {
-    remote.update(size, osKernelSysTick());
-    remote.request();
-  }
-}
-// 遥控器错误回调函数
-extern "C" void HAL_UART_ErrorCallback(UART_HandleTypeDef * huart)
-{
-  if (huart == &huart3) {
-    remote.request();
-  }
-}
+
 // ============================================================
 // 4.can通信
 // ============================================================
@@ -236,14 +226,114 @@ void clear_control_pids()
 //6.电机编码器初始化
 // ============================================================
 // 记录单个轮子相对于初始位置累计转过的角度，用于判断走过的距离，单位：rad
-float record_wheel_angle(float current_angle, float & initial_angle, bool & initialized)
+float record_wheel_angle(float current_angle, float & initial_angle, bool & wheel_angle_initialized)
 {
-  if (!initialized) {
+  if (!wheel_angle_initialized) {
     initial_angle = current_angle;
-    initialized = true;
+    wheel_angle_initialized = true;
   }
 
   return current_angle - initial_angle;
+}
+// ============================================================
+//6.裁判系统初始化
+// ============================================================
+const uint16_t max_power_limit = 80;  //最大功率
+const uint16_t power_margin = 3.0;    // 安全余量，保守取 5W，激进取 2W
+const uint16_t chassis_max_power = max_power_limit - power_margin;
+// 初始化函数
+void referee_init() { pm02.request(); }
+// 回调函数
+extern "C" void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef * huart, uint16_t size)
+{
+  if (huart == &huart3) {
+    remote.update(size, osKernelSysTick());
+    remote.request();
+  }
+  else if (huart == pm02.huart) {
+    pm02.update(size);
+    pm02.request();
+  }
+}
+// 功率控制参数
+const float K1 = 1.23e-07f;        // 铜损系数
+const float K2 = 1.453e-07f;       // 机械损耗系数
+const float CONST_POWER = 4.081f;  // 固定损耗
+
+// 底盘功率限制函数
+// 传入四个电机的期望力矩（PID输出），以及四个电机对象和裁判系统对象
+void chassis_power_limit(
+  float & torque1, float & torque2, float & torque3, float & torque4, sp::RM_Motor & motor1,
+  sp::RM_Motor & motor2, sp::RM_Motor & motor3, sp::RM_Motor & motor4, sp::PM02 & pm02,
+  float max_power)
+{
+  float out[4] = {torque1, torque2, torque3, torque4};
+  sp::RM_Motor * motors[4] = {&motor1, &motor2, &motor3, &motor4};
+  float speed_rad_s[4];      //电机转速（输出端车轮转速*减速比）,单位rad/s
+  float power[4];            //每个电机在限制功率前的预计输出功率,单位 W
+  float total_power = 0.0f;  //总功率
+
+  // 1. 计算每个电机的初始预估功率
+  for (int i = 0; i < 4; i++) {
+    // 将输出轴 rad/s 转换为转子 rad/s
+    float rotor_rad_s = motors[i]->speed * 13.7f;  //电机转速，单位rad/s
+    speed_rad_s[i] = rotor_rad_s;
+
+    // 计算预估总功率
+    power[i] = out[i] * speed_rad_s[i] + K2 * speed_rad_s[i] * speed_rad_s[i] +
+               K1 * out[i] * out[i] + CONST_POWER;
+
+    // 忽略负功率（电机发电状态暂不参与限制）
+    if (power[i] > 0.0f) {
+      total_power += power[i];
+    }
+  }
+
+  // 2. 判断是否超功率，如果超了则按比例缩放
+  if (total_power > max_power) {
+    float scale = max_power / total_power;
+
+    //**功率限制核心算法
+    for (int i = 0; i < 4; i++) {
+      if (power[i] <= 0.0f) continue;  // 负功率不做处理
+
+      float scaled_p = power[i] * scale;  //针对每个电机，按比例削减总功率
+
+      // 反解二次方程（自变量为out）：K1 * out^2 + speed_rad_s * out + K2 * speed_rad_s^2 + CONST - scaled_p = 0
+      float b = speed_rad_s[i];
+      float c = K2 * speed_rad_s[i] * speed_rad_s[i] - scaled_p + CONST_POWER;
+      float inside = b * b - 4.0f * K1 * c;  //delta
+
+      if (inside < 0.0f) {
+        continue;  // 无解，跳过
+      }
+      else {
+        // 根据原力矩方向选择求根公式
+        if (out[i] > 0.0f) {
+          out[i] = (-b + sqrtf(inside)) / (2.0f * K1);
+        }
+        else {
+          out[i] = (-b - sqrtf(inside)) / (2.0f * K1);
+        }
+      }
+    }
+  }
+
+  // 3. 将限制后的力矩写回
+  torque1 = out[0];
+  torque2 = out[1];
+  torque3 = out[2];
+  torque4 = out[3];
+}
+
+extern "C" void HAL_UART_ErrorCallback(UART_HandleTypeDef * huart)
+{
+  if (huart == &huart3) {
+    remote.request();
+  }
+  else if (huart == pm02.huart) {
+    pm02.request();
+  }
 }
 
 extern "C" void control_task(void const * argument)
@@ -251,6 +341,7 @@ extern "C" void control_task(void const * argument)
   (void)argument;
   imu_init();
   remote_init();
+  referee_init();
   //启动定时器10，用于IMU加热
   HAL_TIM_PWM_Start(&htim10, TIM_CHANNEL_1);
 
@@ -259,12 +350,13 @@ extern "C" void control_task(void const * argument)
   const float MAX_SPEED_X = 1.0f;    // 机器人在x方向上的最大速度，单位：m/s
   const float MAX_SPEED_Y = 1.0f;    // 机器人在y方向上的最大速度，单位：m/s
   const float MAX_SPEED_W = 1.0f;    // 机器人绕z轴的额定角速度，单位：rad/s
-  constexpr float WHEEL_TURN_STOP_ANGLE = 10.0f * 2.0f * 3.14159265358979323846f;
-  static bool auto_drive_enabled = false;
-  static bool auto_drive_completed = false;
-  static bool wheel_angle_initialized = false;
-  static float initial_wheel_angle = 0.0f;
-  const float start_yaw = imu.yaw;   // 记录初始偏航角，用于自动直线行驶模式
+  constexpr float WHEEL_TURN_STOP_ANGLE =
+    10.0f * 2.0f * PI;                          //根据实际测定确认底盘行驶3m时轮子转过的圈数
+  static bool auto_drive_enabled = false;       //判断是否可以开始自动直线行驶
+  static bool auto_drive_completed = false;     //判断直线行驶是否结束
+  static bool wheel_angle_initialized = false;  //判断
+  static float initial_wheel_angle = 0.0f;      //初始轮子转过的角度（非电机）
+  const float start_yaw = imu.yaw;              // 记录初始偏航角，用于自动直线行驶模式
 
   // 主循环
   while (true) {
@@ -307,7 +399,7 @@ extern "C" void control_task(void const * argument)
       // ----------------------------------------------------
       case sp::DBusSwitchMode::MID: {
         auto_drive_enabled =
-          false;  // 失能模式下，自动直线行驶模式也应被禁用,以防重新进入UP档位时，底盘会继续前进
+          false;  // 全向运动模式下，自动直线行驶模式也应被禁用,以防重新进入UP档位时，底盘会继续前进
         auto_drive_completed = false;
         wheel_angle_initialized = false;
         constexpr float DIAL_DEADZONE = 0.05f;
@@ -355,10 +447,11 @@ extern "C" void control_task(void const * argument)
         }
 
         // 直线行驶的前置条件：操作者需有一次将左摇杆向上拨至最大位置，否则底盘不会运动
-
+        // 此外如果已经完成了一次直行行驶，底盘也不会再动
         if (left_stick_vertical >= 0.95f && !auto_drive_completed) {
           auto_drive_enabled = true;
         }
+
         if (!auto_drive_enabled) {
           torque_1 = 0.0f;
           torque_2 = 0.0f;
@@ -368,7 +461,10 @@ extern "C" void control_task(void const * argument)
           clear_control_pids();
         }
         else {
-          const float wheel_angle = motor_1.is_open()? record_wheel_angle(motor_1.angle, initial_wheel_angle,wheel_angle_initialized): 0.0f;
+          const float wheel_angle =
+            motor_1.is_open()
+              ? record_wheel_angle(motor_1.angle, initial_wheel_angle, wheel_angle_initialized)
+              : 0.0f;
           if (wheel_angle >= WHEEL_TURN_STOP_ANGLE || wheel_angle <= -WHEEL_TURN_STOP_ANGLE) {
             auto_drive_enabled = false;
             auto_drive_completed = true;
@@ -410,9 +506,16 @@ extern "C" void control_task(void const * argument)
         break;
       }
     }
+    // ============================================================
+    // 底盘功率限制
+    // ============================================================
+
+    chassis_power_limit(
+      torque_1, torque_2, torque_3, torque_4, motor_1, motor_2, motor_3, motor_4, pm02,
+      chassis_max_power);
 
     // ----------------------------------------------------
-    // 10. 发送电机控制指令
+    // 发送电机控制指令
     // ----------------------------------------------------
 
     send_motor_commands(torque_1, torque_2, torque_3, torque_4);
