@@ -1,3 +1,6 @@
+//底盘参数对不对，电机id对不对
+#include <cmath>
+
 #include "cmsis_os.h"
 #include "io/bmi088/bmi088.hpp"
 #include "io/can/can.hpp"
@@ -159,16 +162,15 @@ struct PIDParameters
   float alpha;
 };
 // 左上电机
-PIDParameters motor_1_speed_pid_para(10.0f, 0.0f, 0.0f, 200.0f, 0.0f, 0.1f);
+PIDParameters motor_1_speed_pid_para(1.21f, 0.4615f, 0.0f, 3.0f, 0.52f, 0.01f);
 // 右上电机
-PIDParameters motor_2_speed_pid_para(10.0f, 0.0f, 0.0f, 200.0f, 0.0f, 0.1f);
+PIDParameters motor_2_speed_pid_para(1.21f, 0.4615f, 0.0f, 3.0f, 0.52f, 0.01f);
 // 右下电机
-PIDParameters motor_3_speed_pid_para(10.0f, 0.0f, 0.0f, 200.0f, 0.0f, 0.1f);
+PIDParameters motor_3_speed_pid_para(1.21f, 0.4615f, 0.0f, 3.0f, 0.52f, 0.01f);
 // 左下电机
-PIDParameters motor_4_speed_pid_para(10.0f, 0.0f, 0.0f, 200.0f, 0.0f, 0.1f);
+PIDParameters motor_4_speed_pid_para(1.21f, 0.4615f, 0.0f, 3.0f, 0.52f, 0.01f);
 // imu 位置环 PID
-PIDParameters imu_position_pid_para(10.0f, 0.0f, 0.0f, 100.0f, 0.0f, 0.1f);
-
+PIDParameters imu_position_pid_para(2.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f);
 // PID实例化（针对速度环使用动态积分）
 sp::PID motor_1_speed_pid(
   MOTOR_PID_DT, motor_1_speed_pid_para.kp, motor_1_speed_pid_para.ki, motor_1_speed_pid_para.kd,
@@ -223,6 +225,7 @@ void clear_control_pids()
   motor_3_speed_pid.clear();
   motor_4_speed_pid.clear();
 }
+
 // ============================================================
 //6.电机编码器初始化
 // ============================================================
@@ -348,10 +351,9 @@ extern "C" void control_task(void const * argument)
   can1.config();
   can1.start();
   //限制参数
-  const float MAX_TORQUE = 2000.0f;  // 电机最大输出扭矩，单位：mN·m
-  const float MAX_SPEED_X = 1.0f;    // 机器人在x方向上的最大速度，单位：m/s
-  const float MAX_SPEED_Y = 1.0f;    // 机器人在y方向上的最大速度，单位：m/s
-  const float MAX_SPEED_W = 1.0f;    // 机器人绕z轴的额定角速度，单位：rad/s
+  const float MAX_SPEED_X = 1.0f;  // 机器人在x方向上的最大速度，单位：m/s
+  const float MAX_SPEED_Y = 1.0f;  // 机器人在y方向上的最大速度，单位：m/s
+  const float MAX_SPEED_W = 1.0f;  // 机器人绕z轴的额定角速度，单位：rad/s
   constexpr float WHEEL_TURN_STOP_ANGLE =
     10.0f * 2.0f * PI;                          //根据实际测定确认底盘行驶3m时轮子转过的圈数
   static bool auto_drive_enabled = false;       //判断是否可以开始自动直线行驶
@@ -424,7 +426,6 @@ extern "C" void control_task(void const * argument)
         //根据左摇杆的输入，计算出底盘的速度，并将其转换为各轮的转速
         mecanum.calc(
           MAX_SPEED_X * left_stick_vertical, MAX_SPEED_Y * left_stick_horizontal, target_wz);
-
         // 车轮速度环：目标角速度与电机反馈角速度均为减速箱输出轴 rad/s,无需进行减速比换算
         torque_1 = single_loop_control(motor_1_speed_pid, mecanum.speed_lf, motor_1.speed);
         torque_2 = single_loop_control(motor_2_speed_pid, mecanum.speed_rf, motor_2.speed);
@@ -515,9 +516,9 @@ extern "C" void control_task(void const * argument)
     // 底盘功率限制
     // ============================================================
 
-    chassis_power_limit(
-      torque_1, torque_2, torque_3, torque_4, motor_1, motor_2, motor_3, motor_4, pm02,
-      chassis_max_power);
+    //chassis_power_limit(
+    // torque_1, torque_2, torque_3, torque_4, motor_1, motor_2, motor_3, motor_4, pm02,
+    //chassis_max_power);
 
     // ----------------------------------------------------
     // 发送电机控制指令

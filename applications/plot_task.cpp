@@ -33,7 +33,10 @@ extern "C" void plot_task(void const * argument)
   (void)argument;
 
   while (true) {
-    plotter.plot(mecanum.speed_lf, mecanum.speed_rf, mecanum.speed_rr, mecanum.speed_lr);
+    plotter.plot(
+      mecanum.speed_lf, motor_1.speed, mecanum.speed_rf, motor_2.speed, mecanum.speed_rr,
+      motor_3.speed, mecanum.speed_lr, motor_4.speed, motor_1.torque, motor_2.torque,
+      motor_3.torque, motor_4.torque);
 
     osDelay(10);
   }
