@@ -271,55 +271,62 @@ void chassis_power_limit(
   sp::RM_Motor & motor2, sp::RM_Motor & motor3, sp::RM_Motor & motor4, sp::PM02 & pm02,
   float max_power)
 {
-  float out[4] = {torque1, torque2, torque3, torque4};
+  float out[4] = {torque1, torque2, torque3, torque4};  //输出端力矩，单位N*m
   sp::RM_Motor * motors[4] = {&motor1, &motor2, &motor3, &motor4};
-  float speed_rad_s[4];      //电机转速（输出端车轮转速*减速比）,单位rad/s
+  float speed_rad_s[4];      //输出端车轮转速,单位rad/s
   float power[4];            //每个电机在限制功率前的预计输出功率,单位 W
   float total_power = 0.0f;  //总功率
 
-  // 1. 计算每个电机的初始预估功率
+  // 1. 计算每个电机的初始预估功率（力矩与转速均为输出端口径，无需乘除减速比）
   for (int i = 0; i < 4; i++) {
-    // 将输出轴 rad/s 转换为转子 rad/s
-    float rotor_rad_s = motors[i]->speed * 13.7f;  //电机转速，单位rad/s
+    float rotor_rad_s = motors[i]->speed;  //输出端转速，单位rad/s
     speed_rad_s[i] = rotor_rad_s;
 
     // 计算预估总功率
-    power[i] = out[i] * speed_rad_s[i] + K2 * speed_rad_s[i] * speed_rad_s[i] +
-               K1 * out[i] * out[i] + CONST_POWER;
+    power[i] =
+      out[i] * speed_rad_s[i] + K2 * speed_rad_s[i] * speed_rad_s[i] + K1 * out[i] * out[i];
 
     // 忽略负功率（电机发电状态暂不参与限制）
     if (power[i] > 0.0f) {
       total_power += power[i];
     }
+    total_power += CONST_POWER;  //加上在底盘静态时电调电机的待机能耗
   }
 
-  // 2. 判断是否超功率，如果超了则按比例缩放
+  // 2. 超功率时求解全局缩小系数 K（tau' = K * tau），解二次方程：
+  //    K1*Σ(tau²)*K² + Σ(tau*ω)*K + (K2*Σ(ω²) + 4*CONST_POWER - max_power) = 0
   if (total_power > max_power) {
-    float scale = max_power / total_power;
+    float sum_tau_omega = 0.0f;  //Σ(τω)
+    float sum_tau2 = 0.0f;       //Σ(τ²)
+    float sum_omega2 = 0.0f;     //Σ(ω²)
 
-    //**功率限制核心算法
     for (int i = 0; i < 4; i++) {
-      if (power[i] <= 0.0f) continue;  // 负功率不做处理
+      if (power[i] <= 0.0f) continue;  // 负功率电机不参与缩放
+      sum_tau_omega += out[i] * speed_rad_s[i];
+      sum_tau2 += out[i] * out[i];
+      sum_omega2 += speed_rad_s[i] * speed_rad_s[i];
+    }
 
-      float scaled_p = power[i] * scale;  //针对每个电机，按比例削减总功率
+    float a = K1 * sum_tau2;
+    float b = sum_tau_omega;
+    float c = K2 * sum_omega2 + 4.0f * CONST_POWER - max_power;
 
-      // 反解二次方程（自变量为out）：K1 * out^2 + speed_rad_s * out + K2 * speed_rad_s^2 + CONST - scaled_p = 0
-      float b = speed_rad_s[i];
-      float c = K2 * speed_rad_s[i] * speed_rad_s[i] - scaled_p + CONST_POWER;
-      float inside = b * b - 4.0f * K1 * c;  //delta
-
-      if (inside < 0.0f) {
-        continue;  // 无解，跳过
+    float k = 0.0f;  // 无解时默认清零力矩，保证不反向
+    if (a > 0.0f) {
+      float inside = b * b - 4.0f * a * c;  //delta
+      if (inside >= 0.0f) {
+        k = (-b + sqrtf(inside)) / (2.0f * a);  // 取正根
       }
-      else {
-        // 根据原力矩方向选择求根公式
-        if (out[i] > 0.0f) {
-          out[i] = (-b + sqrtf(inside)) / (2.0f * K1);
-        }
-        else {
-          out[i] = (-b - sqrtf(inside)) / (2.0f * K1);
-        }
-      }
+    }
+
+    // 钳位：只缩小不放大（k<=1），且不改变力矩方向（k>=0）
+    if (k > 1.0f) k = 1.0f;
+    if (k < 0.0f) k = 0.0f;
+
+    //**功率限制核心算法：将 K 乘到每个参与限制的电机力矩上
+    for (int i = 0; i < 4; i++) {
+      if (power[i] <= 0.0f) continue;
+      out[i] *= k;
     }
   }
 
@@ -516,9 +523,9 @@ extern "C" void control_task(void const * argument)
     // 底盘功率限制
     // ============================================================
 
-    //chassis_power_limit(
-    // torque_1, torque_2, torque_3, torque_4, motor_1, motor_2, motor_3, motor_4, pm02,
-    //chassis_max_power);
+    chassis_power_limit(
+      torque_1, torque_2, torque_3, torque_4, motor_1, motor_2, motor_3, motor_4, pm02,
+      chassis_max_power);
 
     // ----------------------------------------------------
     // 发送电机控制指令
