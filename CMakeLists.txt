@@ -58,6 +58,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     sp_middleware/io/plotter/plotter.cpp
     sp_middleware/io/dbus/dbus.cpp
     sp_middleware/io/can/can.cpp
+    sp_middleware/io/power_meter/power_meter.cpp
     sp_middleware/tools/math_tools/math_tools.cpp
     sp_middleware/tools/mecanum/mecanum.cpp
     sp_middleware/motor/rm_motor/rm_motor.cpp

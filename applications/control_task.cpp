@@ -5,6 +5,7 @@
 #include "io/bmi088/bmi088.hpp"
 #include "io/can/can.hpp"
 #include "io/dbus/dbus.hpp"
+#include "io/power_meter/power_meter.hpp"
 #include "motor/rm_motor/rm_motor.hpp"
 #include "referee/pm02/pm02.hpp"
 #include "tim.h"
@@ -16,6 +17,8 @@
 // ============================================================
 //can通信
 sp::CAN can1(&hcan1);
+//功率计
+sp::PowerMeter power_meter;
 //电机
 //规定，从左上开始，按顺时针方向分别为电机1-4，减速比使用更新后的13.7,使用多圈计数
 sp::RM_Motor motor_1(1, sp::RM_Motors::M3508, 13.7f, true);
@@ -132,7 +135,9 @@ extern "C" void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef * hcan)
     if (hcan == &hcan1) {
       can1.recv();
 
-      if (can1.rx_id == motor_1.rx_id)
+      if (can1.rx_id == power_meter.RX_ID)
+        power_meter.read(can1.rx_data, stamp_ms);
+      else if (can1.rx_id == motor_1.rx_id)
         motor_1.read(can1.rx_data, stamp_ms);
       else if (can1.rx_id == motor_2.rx_id)
         motor_2.read(can1.rx_data, stamp_ms);
@@ -386,9 +391,6 @@ extern "C" void control_task(void const * argument)
     const float left_stick_vertical = remote.ch_lv;
     const float left_stick_horizontal = remote.ch_lh;  //获取左摇杆水平和垂直方向的值
     const float left_dial = remote.ch_lu;              //获取左拨轮的值
-    bool motor_is_alive =
-      motor_1.is_alive(osKernelSysTick()) && motor_2.is_alive(osKernelSysTick()) &&
-      motor_3.is_alive(osKernelSysTick()) && motor_4.is_alive(osKernelSysTick());
 
     switch (right_switch) {
       // ----------------------------------------------------
