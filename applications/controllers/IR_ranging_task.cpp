@@ -1,29 +1,44 @@
-#include "can/can.hpp"
-#include "uart/uart_task.hpp"
+#include "cmsis_os.h"
+#include "io/dbus/dbus.hpp"
+#include "io/laser/laser.hpp"
 
-// 红外测距FreeRTOS任务
-// 职责：初始化GY-56(UART6)，持续接收距离数据供折叠任务使用
+sp::LaserGY56 laser(&huart1);
+extern sp::DBus remote;
+// GY-56红外测距数据
+extern "C" {
+volatile float distance = 0.0f;
+}
+
 extern "C" void IR_ranging_task(void const * argument)
 {
   (void)argument;
 
-  // 初始化UART6 + GY-56（含波特率切换）
-  gy56_sensor.init();
+  laser.start_receive();
+  laser.set_baud_rate_115200();
+  laser.save_config();
 
   while (true) {
-    // GY-56为连续输出模式，数据通过DMA中断自动更新 ir_distance_cm
-    // 此任务仅做心跳/超时检测
-    // 如果超过500ms未收到有效数据，标记无效
-    static uint32_t last_valid_tick = 0;
+    // 对外只发布未超时的有效距离, 否则发布无效值
+    distance = laser.is_valid() ? laser.get_distance() : 0xFFFF;
+    osDelay(1);
+  }
+}
+//回调函数
+extern "C" void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef * huart, uint16_t size)
+{
+  if (huart == &huart1) {
+    laser.receive_complete(size);
+  }
 
-    if (ir_valid) {
-      last_valid_tick = osKernelSysTick();
-    }
+  else if (huart == &huart3) {
+    remote.update(size, osKernelSysTick());
+    remote.request();
+  }
+}
 
-    if (osKernelSysTick() - last_valid_tick > 500) {
-      ir_valid = false;
-    }
-
-    osDelay(50);
+extern "C" void HAL_UART_ErrorCallback(UART_HandleTypeDef * huart)
+{
+  if (huart == &huart1) {
+    laser.start_receive();
   }
 }

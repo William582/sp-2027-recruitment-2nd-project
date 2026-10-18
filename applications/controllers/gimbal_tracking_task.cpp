@@ -1,0 +1,1 @@
+extern "C" void gimbal_tracking_task(void const * argument) { (void)argument; }

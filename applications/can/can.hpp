@@ -6,6 +6,7 @@
 #include "gpio.h"
 #include "io/bmi088/bmi088.hpp"
 #include "io/can/can.hpp"
+#include "io/dbus/dbus.hpp"
 #include "io/plotter/plotter.hpp"
 #include "motor/rm_motor/rm_motor.hpp"
 #include "spi.h"
@@ -13,42 +14,29 @@
 #include "tools/pid/pid.hpp"
 #include "usart.h"
 
+// IMU安装旋转矩阵（C板BMI088坐标系→机器人坐标系）
+// 与mecanum_wheel一致，需根据实际安装方向调整
+constexpr float r_ab[3][3] = {{0.0f, -1.0f, 0.0f}, {1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}};
+
 // ============================================================
-// 全局外设对象
+// 全局对象定义
 // ============================================================
 
-// CAN总线
+extern sp::DBus remote;
 extern sp::CAN can1;
-
-// 电机定义（共3个）：
-// motor_pitch : M2006 ID=1, 云台顶端, 折叠+pitch跟随（共享）
-// motor_fold  : GM6020 ID=1, 云台中部, 折叠用
-// motor_yaw   : GM6020 ID=2, 云台底部, yaw跟随
-extern sp::RM_Motor motor_pitch;  // M2006 #1
-extern sp::RM_Motor motor_fold;   // GM6020 #1
-extern sp::RM_Motor motor_yaw;    // GM6020 #2
-
-// IMU
+extern sp::RM_Motor motor_2006;
+extern sp::RM_Motor motor_fold;
+extern sp::RM_Motor motor_yaw;
 extern sp::BMI088 bmi088;
 extern sp::Mahony imu;
-
-// Plotter (UART1, 不用DMA)
 extern sp::Plotter plotter;
 
 // ============================================================
 // 共享状态（跨任务）
 // ============================================================
 
-// 云台工作模式
-//   0 = IDLE        空闲，未折叠，未跟随
-//   1 = FOLDING     折叠/展开中，折叠任务控制电机
-//   2 = FOLDED      已折叠
-//   3 = TRACKING    轨迹跟随中，跟随任务控制电机
-extern "C" volatile int gimbal_mode;
-
 // GY-56红外测距数据
-extern "C" volatile float ir_distance_cm;  // 距离(cm)
-extern "C" volatile bool ir_valid;         // 数据有效
+extern "C" volatile float distance;  // 距离(cm)
 
 // ============================================================
 // 函数声明
@@ -58,7 +46,7 @@ extern "C" volatile bool ir_valid;         // 数据有效
 extern void can_init();
 
 // 发送全部云台电机命令（M2006 0x200帧 + GM6020 0x1FE帧）
-extern void can_send_gimbal();
+extern "C" void send_gimbal_commands(float torque_1, float torque_2, float torque_3);
 
 // CAN接收回调
 extern "C" void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef * hcan);

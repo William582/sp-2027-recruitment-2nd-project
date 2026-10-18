@@ -7,7 +7,6 @@
 #include "referee/pm02/pm02.hpp"
 #include "tim.h"
 #include "tools/mahony/mahony.hpp"
-#include "tools/mecanum/mecanum.hpp"
 #include "tools/pid/pid.hpp"
 sp::Plotter plotter(&huart1, false);
 //can通信
@@ -18,8 +17,6 @@ extern sp::RM_Motor motor_1;
 extern sp::RM_Motor motor_2;
 extern sp::RM_Motor motor_3;
 extern sp::RM_Motor motor_4;
-//麦轮
-extern sp::Mecanum mecanum;
 //dt7遥控器
 extern sp::DBus remote;
 //imu
@@ -33,10 +30,7 @@ extern "C" void plot_task(void const * argument)
   (void)argument;
 
   while (true) {
-    plotter.plot(
-      mecanum.speed_lf, motor_1.speed, mecanum.speed_rf, motor_2.speed, mecanum.speed_rr,
-      motor_3.speed, mecanum.speed_lr, motor_4.speed, motor_1.torque, motor_2.torque,
-      motor_3.torque, motor_4.torque);
+    plotter.plot(1.0f);
 
     osDelay(10);
   }

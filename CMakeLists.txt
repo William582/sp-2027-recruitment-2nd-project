@@ -39,17 +39,38 @@ add_subdirectory(cmake/stm32cubemx)
 
 # Link directories setup
 target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user defined library search paths
+     Add user defined library search paths
 )
 
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user sources here
+    applications/can/can_recv.cpp
+    applications/can/can_send.cpp
+    applications/io/led_task.cpp
+    applications/io/buzzer_task.cpp
+    applications/controllers/gimbal_folding_task.cpp
+    applications/controllers/gimbal_tracking_task.cpp
+    applications/controllers/IR_ranging_task.cpp
+    applications/plot_task.cpp
+    sp_middleware/io/led/led.cpp
+    sp_middleware/io/buzzer/buzzer.cpp
+    sp_middleware/io/bmi088/bmi088.cpp
+    sp_middleware/tools/mahony/mahony.cpp
+    sp_middleware/io/plotter/plotter.cpp
+    sp_middleware/io/dbus/dbus.cpp
+    sp_middleware/io/can/can.cpp
+    sp_middleware/tools/math_tools/math_tools.cpp
+    sp_middleware/motor/rm_motor/rm_motor.cpp
+    sp_middleware/tools/pid/pid.cpp
+    sp_middleware/tools/crc/crc.cpp
+    applications/trajectory_task.cpp
+    sp_middleware/io/laser/laser.cpp# # Add user sources here
 )
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user defined include paths
+     applications/
+     sp_middleware/# Add user defined include paths
 )
 
 # Add project symbols (macros)

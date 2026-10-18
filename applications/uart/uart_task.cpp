@@ -7,8 +7,6 @@
 // 参考文档：https://tj-superpower.feishu.cn/file/SmGebL87YovSHDxABFQcm1J4ngy
 namespace sp
 {
-GY56 gy56_sensor(&huart6);
-
 GY56::GY56(UART_HandleTypeDef * huart) : huart_(huart) {}
 
 // ============================================================
@@ -95,24 +93,3 @@ void GY56::recv(uint16_t size)
 }
 
 }  // namespace sp
-
-// ============================================================
-// UART接收回调（DMA + IDLE）
-// ============================================================
-extern "C" void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef * huart, uint16_t size)
-{
-  if (huart == &huart6) {
-    gy56_sensor.recv(size);
-    gy56_sensor.start();
-  }
-}
-
-// ============================================================
-// UART错误回调
-// ============================================================
-extern "C" void HAL_UART_ErrorCallback(UART_HandleTypeDef * huart)
-{
-  if (huart == &huart6) {
-    gy56_sensor.start();
-  }
-}

@@ -1,5 +1,6 @@
 #include "can/can.hpp"
 
+// can回调函数
 extern "C" void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef * hcan)
 {
   auto stamp_ms = osKernelSysTick();
@@ -10,8 +11,8 @@ extern "C" void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef * hcan)
     if (can1.frame_type) continue;  // 跳过扩展帧
 
     // 分发到对应电机
-    if (can1.rx_id == motor_pitch.rx_id)
-      motor_pitch.read(can1.rx_data, stamp_ms);
+    if (can1.rx_id == motor_2006.rx_id)
+      motor_2006.read(can1.rx_data, stamp_ms);
     else if (can1.rx_id == motor_fold.rx_id)
       motor_fold.read(can1.rx_data, stamp_ms);
     else if (can1.rx_id == motor_yaw.rx_id)
