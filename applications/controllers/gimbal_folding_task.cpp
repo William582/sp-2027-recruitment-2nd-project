@@ -60,19 +60,6 @@ void remote_init() { remote.request(); }
 // ----------------------------------------------------
 // PID
 // ----------------------------------------------------
-//dt kp ki kd maxout maxiout alpha
-sp::PID pid_position_2006(FOLD_TASK_DT, 5.0f, 0.0f, 0.05f, 3.0f, 0.5f, 0.1f, false, true);
-sp::PID pid_position_pitch(FOLD_TASK_DT, 5.0f, 0.0f, 0.05f, 1.8f, 0.3f, 0.1f, false, true);
-
-sp::PID pid_speed_2006(FOLD_TASK_DT, 5.0f, 0.0f, 0.05f, 3.0f, 0.5f, 0.1f, false, true);
-sp::PID pid_speed_pitch(FOLD_TASK_DT, 5.0f, 0.0f, 0.05f, 1.8f, 0.3f, 0.1f, false, true);
-
-// 清除折叠控制使用的 PID
-void clear_control_pids()
-{
-  pid_position_2006.clear();
-  pid_position_pitch.clear();
-}
 
 // 单环控制函数
 float single_loop_control(sp::PID & pid, float target_variable, float actual_variable)
@@ -179,5 +166,5 @@ extern "C" void gimbal_folding_task(void const * argument)
       }
     }  //switch (left_switch)
   }  //while(true)
-  osDelay(5);
+  osDelay(10);
 }  //任务函数

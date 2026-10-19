@@ -45,22 +45,13 @@
  */
 
 #include "can/can.hpp"
-#include "cmsis_os.h"
 #include "task.h"
 #include "trajectory_task.hpp"
 
 // ============================================================
 // 控制周期
 // ============================================================
-constexpr float TRACK_DT = 0.001f;        // 控制周期 1ms (秒)
-constexpr uint32_t TRACK_PERIOD_MS = 1U;  // 任务周期 1ms
-
-// ============================================================
-// 安装方向系数
-// 如轨迹正方向与电机正方向相反，改为 -1.0f
-// ============================================================
-constexpr float YAW_SIGN = 1.0f;
-constexpr float PITCH_SIGN = 1.0f;
+constexpr float TRACK_DT = 0.001f;  // 控制周期 1ms (秒)
 
 // ============================================================
 // 输出限幅参数
@@ -73,9 +64,9 @@ constexpr float YAW_MAX_VEL = 12.0f;    // 位置环输出(目标速度)限幅 r
 constexpr float PITCH_MAX_TORQUE = 3.0f;
 constexpr float PITCH_MAX_VEL = 12.0f;
 
-// Fold轴 (GM6020, 保持展开)
+// pitch轴 (GM6020, 保持展开)
 constexpr float FOLD_MAX_TORQUE = 1.8f;
-constexpr float FOLD_HOLD_TARGET_RAD = 0.0f;  // 展开状态目标角度
+constexpr float FOLD_HOLD_TARGET_ANGLE = 0.0f;  // 展开状态目标角度
 
 // ============================================================
 // 前馈增益
@@ -84,54 +75,30 @@ constexpr float YAW_FF_VEL = 1.0f;   // 速度前馈：将轨迹速度直接前�
 constexpr float YAW_FF_ACC = 0.01f;  // 加速度前馈：将轨迹加速度转换为力矩前馈
 constexpr float PITCH_FF_VEL = 1.0f;
 constexpr float PITCH_FF_ACC = 0.01f;
+// ============================================================
+// PID
+// ============================================================
+//dt kp ki kd maxout maxiout alpha multi_circle dynamic
+// Yaw轴 (GM6020 #2)
+sp::PID pid_position_yaw(TRACK_DT, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.85f, true, false);
+sp::PID pid_speed_yaw(TRACK_DT, 3.0f, 0.2f, 0.0f, 0.0f, 0.0f, 0.85f, false, false);
 
-// ============================================================
-// 级联PID — Yaw轴 (GM6020 #2)
-// ============================================================
-// 位置环：输入角度(rad)，输出目标速度(rad/s)
-sp::PID pid_yaw_pos(
-  TRACK_DT,
-  20.0f,        // kp: 位置响应增益
-  0.0f,         // ki: 位置环不使用积分(由速度环承担)
-  0.0f,         // kd: 抑制位置振荡
-  YAW_MAX_VEL,  // max_out: 输出速度限幅
-  0.0f,         // max_iout
-  0.85f,        // alpha: D项低通滤波系数 (0~1, 越小滤波越强)
-  true,         // angular: 角度环绕处理(±π跳变)
-  false);       // dynamic: 不使用变速积分
+// Pitch轴 (M2006 #1)
+sp::PID pid_position_2006(TRACK_DT, 20.0f, 0.0f, 0.2f, PITCH_MAX_VEL, 0.0f, 0.85f, true, false);
+sp::PID pid_speed_2006(TRACK_DT, 3.0f, 0.2f, 0.03f, PITCH_MAX_TORQUE, 0.5f, 0.85f, false, false);
 
-// 速度环：输入速度(rad/s)，输出力矩(N·m)
-sp::PID pid_yaw_vel(
-  TRACK_DT,
-  3.0f,            // kp: 速度响应增益
-  0.2f,            // ki: 消除稳态速度误差
-  0.03f,           // kd: 速度阻尼
-  YAW_MAX_TORQUE,  // max_out: 输出力矩限幅
-  0.5f,            // max_iout: 积分项限幅
-  0.85f,           // alpha
-  false,           // angular: 速度不做环绕处理
-  false);          // dynamic
+// Pitch轴 (GM6020 #1)
+sp::PID pid_position_pitch(TRACK_DT, 5.0f, 0.0f, 0.05f, FOLD_MAX_TORQUE, 0.3f, 0.8f, false, false);
+sp::PID pid_speed_pitch(TRACK_DT, 3.0f, 0.2f, 0.03f, PITCH_MAX_TORQUE, 0.5f, 0.85f, false, false);
 
-// ============================================================
-// 级联PID — Pitch轴 (M2006 #1)
-// ============================================================
-sp::PID pid_pitch_pos(TRACK_DT, 20.0f, 0.0f, 0.2f, PITCH_MAX_VEL, 0.0f, 0.85f, true, false);
-
-sp::PID pid_pitch_vel(TRACK_DT, 3.0f, 0.2f, 0.03f, PITCH_MAX_TORQUE, 0.5f, 0.85f, false, false);
-
-// ============================================================
-// 单环PID — Fold轴 (GM6020 #1, 保持展开)
-// ============================================================
-// sp::PID pid_fold(TRACK_DT, 5.0f, 0.0f, 0.05f, FOLD_MAX_TORQUE, 0.3f, 0.8f, false, true);
-
-// ============================================================
-// 辅助函数：对称限幅
-// ============================================================
-static inline float clampf(float x, float limit)
+// 清除跟随控制使用的 PID
+void clear_control_pids()
 {
-  if (x > limit) return limit;
-  if (x < -limit) return -limit;
-  return x;
+  pid_position_2006.clear();
+  pid_position_pitch.clear();
+  pid_speed_2006.clear();
+  pid_speed_pitch.clear();
+  pid_position_pitch.clear();
 }
 
 // ============================================================
@@ -143,71 +110,39 @@ extern "C" void gimbal_tracking_task(void const * argument)
 
   // --- 初始化CAN ---
   can_init();
-
-  // --- 等待 yaw/pitch 电机反馈上线 ---
-  while (!motor_yaw.is_open() || !motor_2006.is_open()) {
-    HAL_CAN_RxFifo0MsgPendingCallback(&hcan1);
-    osDelay(10);
-  }
-
   // --- 清除PID历史状态 ---
-  pid_yaw_pos.clear();
-  pid_yaw_vel.clear();
-  pid_pitch_pos.clear();
-  pid_pitch_vel.clear();
-  // pid_fold.clear();
+  clear_control_pids();
 
   // --- 计算位置偏移 ---
-  // 读取轨迹起始点，使任务启动瞬间目标=当前角度，避免初始阶跃冲击
+  // 读取轨迹起始点
   const TrajectoryPoint traj0 = trajectory_read();
-  const float yaw_offset = motor_yaw.angle - YAW_SIGN * traj0.yaw;
-  const float pitch_offset = motor_2006.angle - PITCH_SIGN * traj0.pitch;
 
-  // --- 精确周期控制循环 (1ms) ---
-  TickType_t last_wake = xTaskGetTickCount();
-
-  for (;;) {
-    // 1. 触发CAN接收，刷新电机编码器反馈
+  while (fold_state == FoldState::UNFOLD) {
+    //CAN通信反馈函数
     HAL_CAN_RxFifo0MsgPendingCallback(&hcan1);
 
-    // 2. 读取当前轨迹目标 (位置 / 速度 / 加速度)
+    //读取当前轨迹目标 (位置 / 速度 / 加速度)
     const TrajectoryPoint traj = trajectory_read();
 
-    // ===== 3. Yaw轴 级联PID + 前馈 =====
-    // 3a. 外环(位置)：PID(目标角度, 编码器角度) → 目标速度修正量
-    const float yaw_target = YAW_SIGN * traj.yaw + yaw_offset;
-    pid_yaw_pos.calc(yaw_target, motor_yaw.angle);
-    // 3b. 叠加轨迹速度前馈 → 完整目标速度
-    const float yaw_vel_set = pid_yaw_pos.out + YAW_FF_VEL * YAW_SIGN * traj.yaw_vel;
-    // 3c. 内环(速度)：PID(目标速度, 编码器速度) → 力矩
-    pid_yaw_vel.calc(yaw_vel_set, motor_yaw.speed);
-    // 3d. 叠加加速度前馈并限幅
-    const float yaw_torque =
-      clampf(pid_yaw_vel.out + YAW_FF_ACC * YAW_SIGN * traj.yaw_acc, YAW_MAX_TORQUE);
+    float torque_2006 = 0.0f;
+    float torque_pitch = 0.0f;
+    float torque_yaw = 0.0f;
 
-    // ===== 4. Pitch轴 级联PID + 前馈 =====
-    const float pitch_target = PITCH_SIGN * traj.pitch + pitch_offset;
-    pid_pitch_pos.calc(pitch_target, motor_2006.angle);
-    const float pitch_vel_set = pid_pitch_pos.out + PITCH_FF_VEL * PITCH_SIGN * traj.pitch_vel;
-    pid_pitch_vel.calc(pitch_vel_set, motor_2006.speed);
-    const float pitch_torque =
-      clampf(pid_pitch_vel.out + PITCH_FF_ACC * PITCH_SIGN * traj.pitch_acc, PITCH_MAX_TORQUE);
+    torque_2006 = dual_loop_control(
+      pid_position_2006, pid_speed_2006, traj.pitch, motor_2006.angle, motor_2006.speed);
+    torque_yaw = dual_loop_control(
+      pid_position_yaw, pid_speed_yaw, traj.yaw, motor_yaw.angle, motor_yaw.speed);
+    torque_pitch =
+      single_loop_control(pid_position_pitch, FOLD_HOLD_TARGET_ANGLE, motor_pitch.angle);
 
-    // ===== 5. Fold轴 保持展开状态 =====
-    // pid_fold.calc(FOLD_HOLD_TARGET_RAD, motor_fold.angle);
-    // const float fold_torque = pid_fold.out;
-
-    // ===== 6. 发送电机命令 =====
+    // 发送电机命令
     // 参数顺序: (M2006 pitch力矩, GM6020 fold力矩, GM6020 yaw力矩)
-    send_gimbal_commands(pitch_torque, 0.0f, yaw_torque);
+    send_gimbal_commands(torque_2006, torque_pitch, torque_yaw);
 
-    // ===== 7. 绘图输出 =====
+    //绘图输出
     // ch1: yaw目标  ch2: yaw实际  ch3: pitch目标  ch4: pitch实际
     // ch5: yaw力矩  ch6: pitch力矩
-    plotter.plot(
-      yaw_target, motor_yaw.angle, pitch_target, motor_2006.angle, yaw_torque, pitch_torque);
-
-    // ===== 8. 1ms精确周期 =====
-    vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(TRACK_PERIOD_MS));
+    plotter.plot(1.0f);
   }
+  osDelay(10);
 }
