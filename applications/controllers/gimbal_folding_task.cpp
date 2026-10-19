@@ -1,39 +1,38 @@
 #include <cmath>
 
 #include "can/can.hpp"
-#include "cmsis_os.h"
-#include "io/dbus/dbus.hpp"
-#include "tools/pid/pid.hpp"
-
-extern "C" volatile float distance;
 
 // 限制参数
 constexpr float FOLD_THRESHOLD_CM = 30.0f;
 constexpr float IMU_STATIONARY_THRESHOLD_RAD_S = 0.05f;
-constexpr float FOLD_TARGET_RAD = 1.5708f;
+constexpr float FOLD_TARGET_ANGLE = 1.5708f;
+constexpr float UNFOLD_TARGET_ANGLE = 0.0f;
 constexpr float FOLD_MOTOR_TOLERANCE = 0.05f;
 constexpr float FOLD_TASK_DT = 0.001f;
 
-// ----------------------------------------------------
-// 折叠状态
-// ----------------------------------------------------
-enum class FoldState
-{
-  WAITING,
-  FOLDING,
-  FOLDED,
-};
-
+// 初始化云台状态，此时应为打开
 FoldState fold_state = FoldState::WAITING;
+
+// ----------------------------------------------------
+// 云台电机（M2006 ， M6020*2）
+// ----------------------------------------------------
+sp::RM_Motor motor_2006(1, sp::RM_Motors::M2006, 1.0f, true);    // M2006 #1
+sp::RM_Motor motor_pitch(1, sp::RM_Motors::GM6020, 1.0f, true);  // GM6020 #1
+sp::RM_Motor motor_yaw(2, sp::RM_Motors::GM6020, 1.0f, true);    // GM6020 #2
 // ----------------------------------------------------
 // imu
 // ----------------------------------------------------
+sp::BMI088 bmi088(&hspi1, GPIOA, GPIO_PIN_4, GPIOB, GPIO_PIN_0, r_ab);
+sp::Mahony imu(1e-3f);  // dt=1ms, 1kHz
 bool imu_ready = false;
+
+// imu初始化函数
 void imu_init()
 {
   bmi088.init();
   imu_ready = true;
 }
+
 //imu数据更新与姿态解算函数
 void imu_update()
 {
@@ -43,29 +42,6 @@ void imu_update()
   bmi088.update();
   imu.update(bmi088.acc, bmi088.gyro);
 }
-// ----------------------------------------------------
-// 遥控器
-// ----------------------------------------------------
-//遥控器初始化函数
-void remote_init() { remote.request(); }
-
-// ----------------------------------------------------
-// PID
-// ----------------------------------------------------
-sp::PID pid_2006(FOLD_TASK_DT, 5.0f, 0.0f, 0.05f, 3.0f, 0.5f, 0.8f, false, true);
-sp::PID pid_fold(FOLD_TASK_DT, 5.0f, 0.0f, 0.05f, 1.8f, 0.3f, 0.8f, false, true);
-// 单环控制函数
-float single_loop_control(sp::PID & pid, float target_variable, float actual_variable)
-{
-  pid.calc(target_variable, actual_variable);
-  return pid.out;
-}
-// 清除折叠控制使用的 PID
-void clear_control_pid()
-{
-  pid_2006.clear();
-  pid_fold.clear();
-}
 
 // 陀螺仪存在微小噪声，因此用阈值判断三轴角速度是否接近零。
 bool imu_is_stationary()
@@ -73,6 +49,48 @@ bool imu_is_stationary()
   return fabsf(imu.w[0]) < IMU_STATIONARY_THRESHOLD_RAD_S &&
          fabsf(imu.w[1]) < IMU_STATIONARY_THRESHOLD_RAD_S &&
          fabsf(imu.w[2]) < IMU_STATIONARY_THRESHOLD_RAD_S;
+}
+// ----------------------------------------------------
+// 遥控器
+// ----------------------------------------------------
+
+//遥控器初始化函数
+void remote_init() { remote.request(); }
+
+// ----------------------------------------------------
+// PID
+// ----------------------------------------------------
+//dt kp ki kd maxout maxiout alpha
+sp::PID pid_position_2006(FOLD_TASK_DT, 5.0f, 0.0f, 0.05f, 3.0f, 0.5f, 0.1f, false, true);
+sp::PID pid_position_pitch(FOLD_TASK_DT, 5.0f, 0.0f, 0.05f, 1.8f, 0.3f, 0.1f, false, true);
+
+sp::PID pid_speed_2006(FOLD_TASK_DT, 5.0f, 0.0f, 0.05f, 3.0f, 0.5f, 0.1f, false, true);
+sp::PID pid_speed_pitch(FOLD_TASK_DT, 5.0f, 0.0f, 0.05f, 1.8f, 0.3f, 0.1f, false, true);
+
+// 清除折叠控制使用的 PID
+void clear_control_pids()
+{
+  pid_position_2006.clear();
+  pid_position_pitch.clear();
+}
+
+// 单环控制函数
+float single_loop_control(sp::PID & pid, float target_variable, float actual_variable)
+{
+  pid.calc(target_variable, actual_variable);
+  return pid.out;
+}
+
+// 双环控制函数
+float dual_loop_control(
+  sp::PID & position_pid, sp::PID & speed_pid, float target_angle, float actual_angle,
+  float actual_speed)
+{
+  position_pid.calc(target_angle, actual_angle);
+  const float target_speed = position_pid.out;
+  // 位置外环输出目标速度；速度内环输出最终控制量
+  speed_pid.calc(target_speed, actual_speed);
+  return speed_pid.out;
 }
 
 extern "C" void gimbal_folding_task(void const * argument)
@@ -83,72 +101,83 @@ extern "C" void gimbal_folding_task(void const * argument)
   remote_init();
 
   while (true) {
-    float torque_2006 = 0.0f;
-    float torque_fold = 0.0f;
-
     imu_update();
     HAL_CAN_RxFifo0MsgPendingCallback(&hcan1);
 
-    if (!motor_2006.is_open()) {
-      osDelay(100);
-      continue;
-    }
+    float torque_2006 = 0.0f;
+    float torque_pitch = 0.0f;
 
+    // 获取遥控器左拨杆档位
     const sp::DBusSwitchMode left_switch = remote.sw_l;  //获取左拨杆档位
 
     switch (left_switch) {
+      // ----------------------------------------------------
+      // DOWN：失能模式
+      // ----------------------------------------------------
       case sp::DBusSwitchMode::DOWN: {
-        motor_fold.torque = 0.0f;
+        motor_pitch.torque = 0.0f;
         motor_2006.torque = 0.0f;
-        clear_control_pid();
+
+        clear_control_pids();
+
+        break;
       }
 
+      // ----------------------------------------------------
+      // MID：折叠准备模式（当distance小于阈值时折叠）
+      // ----------------------------------------------------
       case sp::DBusSwitchMode::MID: {
         switch (fold_state) {
-          case FoldState::WAITING:
-            // 只有有效测距值小于阈值时才开始收起云台。
+          // ---------
+          // WAITING
+          // ---------
+          case FoldState::WAITING: {
+            // 当有效测距值小于阈值时更改云台状态，进入FOLD状态
             if (distance < FOLD_THRESHOLD_CM) {
-              fold_state = FoldState::FOLDING;
-              clear_control_pid();
+              fold_state = FoldState::FOLD;
+              clear_control_pids();
             }
-            break;
+            else
+              continue;
 
-          case FoldState::FOLDING: {
-            torque_fold = single_loop_control(pid_fold, FOLD_TARGET_RAD, motor_fold.angle);
-            torque_2006 = single_loop_control(pid_2006, -FOLD_TARGET_RAD, motor_2006.angle);
-
-            send_gimbal_commands(torque_2006, torque_fold, 0.0f);
-
-            const bool fold_reached =
-              fabsf(FOLD_TARGET_RAD - motor_fold.angle) < FOLD_MOTOR_TOLERANCE;
-            const bool pitch_reached =
-              fabsf(-FOLD_TARGET_RAD - motor_2006.angle) < FOLD_MOTOR_TOLERANCE;
-            if (fold_reached && pitch_reached) {
-              fold_state = FoldState::FOLDED;
-            }
             break;
           }
+          // ---------
+          // FOLD
+          // ---------
+          case FoldState::FOLD: {
+            torque_2006 = dual_loop_control(
+              pid_position_2006, pid_speed_2006, -FOLD_TARGET_ANGLE, motor_2006.angle,
+              motor_2006.speed);
+            torque_pitch = dual_loop_control(
+              pid_position_pitch, pid_speed_pitch, FOLD_TARGET_ANGLE, motor_pitch.angle,
+              motor_pitch.speed);
 
-          case FoldState::FOLDED:
-            // 保持收起位置，直到 C 板 IMU 检测到机体基本静止。
-            torque_fold = single_loop_control(pid_fold, FOLD_TARGET_RAD, motor_fold.angle);
-            torque_2006 = single_loop_control(pid_2006, -FOLD_TARGET_RAD, motor_2006.angle);
-
-            send_gimbal_commands(torque_2006, torque_fold, 0.0f);
+            send_gimbal_commands(torque_2006, torque_pitch, 0.0f);
 
             break;
-        }
-        case sp::DBusSwitchMode::UP: {
-          torque_fold = single_loop_control(pid_fold, 0.0f, motor_fold.angle);
-          torque_2006 = single_loop_control(pid_2006, 0.0f, motor_2006.angle);
-
-          send_gimbal_commands(torque_2006, torque_fold, 0.0f);
-
-          break;
-        }
+          }
+          default:
+            break;
+        }  // switch (fold_state)
       }
-    }
+      case sp::DBusSwitchMode::UP: {
+        if (fold_state == FoldState::UNFOLD) {
+          torque_2006 = dual_loop_control(
+            pid_position_2006, pid_speed_2006, UNFOLD_TARGET_ANGLE, motor_2006.angle,
+            motor_2006.speed);
+          torque_pitch = dual_loop_control(
+            pid_position_pitch, pid_speed_pitch, UNFOLD_TARGET_ANGLE, motor_pitch.angle,
+            motor_pitch.speed);
 
-    osDelay(5);
-  }
-}
+          send_gimbal_commands(torque_2006, torque_pitch, 0.0f);
+
+          if (motor_2006.angle == UNFOLD_TARGET_ANGLE && motor_pitch.angle == UNFOLD_TARGET_ANGLE)
+            fold_state = FoldState::UNFOLD;
+        }
+        break;
+      }
+    }  //switch (left_switch)
+  }  //while(true)
+  osDelay(5);
+}  //任务函数

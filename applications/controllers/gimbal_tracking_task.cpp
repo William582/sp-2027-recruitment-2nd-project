@@ -44,11 +44,9 @@
  * ============================================================
  */
 
-#include "FreeRTOS.h"
 #include "can/can.hpp"
 #include "cmsis_os.h"
 #include "task.h"
-#include "tools/pid/pid.hpp"
 #include "trajectory_task.hpp"
 
 // ============================================================
@@ -124,7 +122,7 @@ sp::PID pid_pitch_vel(TRACK_DT, 3.0f, 0.2f, 0.03f, PITCH_MAX_TORQUE, 0.5f, 0.85f
 // ============================================================
 // 单环PID — Fold轴 (GM6020 #1, 保持展开)
 // ============================================================
-sp::PID pid_fold(TRACK_DT, 5.0f, 0.0f, 0.05f, FOLD_MAX_TORQUE, 0.3f, 0.8f, false, true);
+// sp::PID pid_fold(TRACK_DT, 5.0f, 0.0f, 0.05f, FOLD_MAX_TORQUE, 0.3f, 0.8f, false, true);
 
 // ============================================================
 // 辅助函数：对称限幅
@@ -157,7 +155,7 @@ extern "C" void gimbal_tracking_task(void const * argument)
   pid_yaw_vel.clear();
   pid_pitch_pos.clear();
   pid_pitch_vel.clear();
-  pid_fold.clear();
+  // pid_fold.clear();
 
   // --- 计算位置偏移 ---
   // 读取轨迹起始点，使任务启动瞬间目标=当前角度，避免初始阶跃冲击
@@ -196,12 +194,12 @@ extern "C" void gimbal_tracking_task(void const * argument)
       clampf(pid_pitch_vel.out + PITCH_FF_ACC * PITCH_SIGN * traj.pitch_acc, PITCH_MAX_TORQUE);
 
     // ===== 5. Fold轴 保持展开状态 =====
-    pid_fold.calc(FOLD_HOLD_TARGET_RAD, motor_fold.angle);
-    const float fold_torque = pid_fold.out;
+    // pid_fold.calc(FOLD_HOLD_TARGET_RAD, motor_fold.angle);
+    // const float fold_torque = pid_fold.out;
 
     // ===== 6. 发送电机命令 =====
     // 参数顺序: (M2006 pitch力矩, GM6020 fold力矩, GM6020 yaw力矩)
-    send_gimbal_commands(pitch_torque, fold_torque, yaw_torque);
+    send_gimbal_commands(pitch_torque, 0.0f, yaw_torque);
 
     // ===== 7. 绘图输出 =====
     // ch1: yaw目标  ch2: yaw实际  ch3: pitch目标  ch4: pitch实际
