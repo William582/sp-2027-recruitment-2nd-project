@@ -103,6 +103,7 @@ void remote_init() { remote.request(); }
 // 4.can通信
 // ============================================================
 constexpr size_t MOTOR_COUNT = 4;
+
 //向电机发送控制命令
 void send_motor_commands(float torque_1, float torque_2, float torque_3, float torque_4)
 {
@@ -135,6 +136,7 @@ extern "C" void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef * hcan)
     if (hcan == &hcan1) {
       can1.recv();
 
+      // 分发到对应电机
       if (can1.rx_id == power_meter.RX_ID)
         power_meter.read(can1.rx_data, stamp_ms);
       else if (can1.rx_id == motor_1.rx_id)
@@ -264,13 +266,22 @@ extern "C" void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef * huart, uint16_t 
     pm02.request();
   }
 }
+
+extern "C" void HAL_UART_ErrorCallback(UART_HandleTypeDef * huart)
+{
+  if (huart == &huart3) {
+    remote.request();
+  }
+  else if (huart == pm02.huart) {
+    pm02.request();
+  }
+}
 // 功率控制参数
 const float K1 = 2.0f;             // 铜损系数
 const float K2 = 0.01f;            // 机械损耗系数
 const float CONST_POWER = 4.081f;  // 固定损耗
 
 // 底盘功率限制函数
-// 传入四个电机的期望力矩（PID输出），以及四个电机对象和裁判系统对象
 void chassis_power_limit(
   float & torque1, float & torque2, float & torque3, float & torque4, sp::RM_Motor & motor1,
   sp::RM_Motor & motor2, sp::RM_Motor & motor3, sp::RM_Motor & motor4, sp::PM02 & pm02,
@@ -328,7 +339,7 @@ void chassis_power_limit(
     if (k > 1.0f) k = 1.0f;
     if (k < 0.0f) k = 0.0f;
 
-    //**功率限制核心算法：将 K 乘到每个参与限制的电机力矩上
+    //将 K 乘到每个参与限制的电机力矩上
     for (int i = 0; i < 4; i++) {
       if (power[i] <= 0.0f) continue;
       out[i] *= k;
@@ -340,16 +351,6 @@ void chassis_power_limit(
   torque2 = out[1];
   torque3 = out[2];
   torque4 = out[3];
-}
-
-extern "C" void HAL_UART_ErrorCallback(UART_HandleTypeDef * huart)
-{
-  if (huart == &huart3) {
-    remote.request();
-  }
-  else if (huart == pm02.huart) {
-    pm02.request();
-  }
 }
 
 extern "C" void control_task(void const * argument)
