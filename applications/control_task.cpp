@@ -40,6 +40,7 @@ sp::BMI088 bmi088(&hspi1, GPIOA, GPIO_PIN_4, GPIOB, GPIO_PIN_0, r_ab);
 sp::Mahony imu(1e-3f);
 // referee
 sp::PM02 pm02(&huart6);
+float total_power;  //总功率
 // ============================================================
 //2.imu初始化
 // ============================================================
@@ -169,13 +170,13 @@ struct PIDParameters
   float alpha;
 };
 // 左上电机
-PIDParameters motor_1_speed_pid_para(1.21f, 0.4615f, 0.0f, 3.0f, 0.52f, 0.01f);
+PIDParameters motor_1_speed_pid_para(1.19f, 0.4615f, 0.0f, 3.0f, 0.52f, 0.01f);
 // 右上电机
-PIDParameters motor_2_speed_pid_para(1.21f, 0.4615f, 0.0f, 3.0f, 0.52f, 0.01f);
+PIDParameters motor_2_speed_pid_para(1.19f, 0.4615f, 0.0f, 3.0f, 0.52f, 0.01f);
 // 右下电机
-PIDParameters motor_3_speed_pid_para(1.21f, 0.4615f, 0.0f, 3.0f, 0.52f, 0.01f);
+PIDParameters motor_3_speed_pid_para(1.19f, 0.4615f, 0.0f, 3.0f, 0.52f, 0.01f);
 // 左下电机
-PIDParameters motor_4_speed_pid_para(1.21f, 0.4615f, 0.0f, 3.0f, 0.52f, 0.01f);
+PIDParameters motor_4_speed_pid_para(1.19f, 0.4615f, 0.0f, 3.0f, 0.52f, 0.01f);
 // imu 位置环 PID
 PIDParameters imu_position_pid_para(2.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f);
 // PID实例化（针对速度环使用动态积分）
@@ -249,8 +250,8 @@ float record_wheel_angle(float current_angle, float & initial_angle, bool & whee
 // ============================================================
 //6.裁判系统初始化
 // ============================================================
-const uint16_t max_power_limit = 80;  //最大功率
-const uint16_t power_margin = 3.0;    // 安全余量，保守取 5W，激进取 2W
+const uint16_t max_power_limit = 40;  //最大功率
+const uint16_t power_margin = 3;      // 安全余量，保守取 5W，激进取 2W
 const uint16_t chassis_max_power = max_power_limit - power_margin;
 // 初始化函数
 void referee_init() { pm02.request(); }
@@ -277,10 +278,35 @@ extern "C" void HAL_UART_ErrorCallback(UART_HandleTypeDef * huart)
   }
 }
 // 功率控制参数
-const float K1 = 2.0f;             // 铜损系数
-const float K2 = 0.01f;            // 机械损耗系数
-const float CONST_POWER = 4.081f;  // 固定损耗
+const float K1 = 2.0f;            // 铜损系数
+const float K2 = 0.01f;           // 机械损耗系数
+const float CONST_POWER = 4.20f;  // 固定损耗
+float chassis_power_calculate(
+  float & torque1, float & torque2, float & torque3, float & torque4, sp::RM_Motor & motor1,
+  sp::RM_Motor & motor2, sp::RM_Motor & motor3, sp::RM_Motor & motor4)
+{
+  float out[4] = {torque1, torque2, torque3, torque4};  //输出端力矩，单位N*m
+  sp::RM_Motor * motors[4] = {&motor1, &motor2, &motor3, &motor4};
+  float speed_rad_s[4];  //输出端车轮转速,单位rad/s
+  float power[4];        //每个电机在限制功率前的预计输出功率,单位 W
+  float total_power_ = 0.0f;
+  // 1. 计算每个电机的初始预估功率（力矩与转速均为输出端口径，无需乘除减速比）
+  for (int i = 0; i < 4; i++) {
+    float rotor_rad_s = motors[i]->speed;  //输出端转速，单位rad/s
+    speed_rad_s[i] = rotor_rad_s;
 
+    // 计算预估总功率
+    power[i] =
+      out[i] * speed_rad_s[i] + K2 * speed_rad_s[i] * speed_rad_s[i] + K1 * out[i] * out[i];
+
+    // 忽略负功率（电机发电状态暂不参与限制）
+    if (power[i] > 0.0f) {
+      total_power_ += power[i];
+    }
+  }
+  total_power_ += CONST_POWER;  //加上在底盘静态时电调电机的待机能耗
+  return total_power_;
+}
 // 底盘功率限制函数
 void chassis_power_limit(
   float & torque1, float & torque2, float & torque3, float & torque4, sp::RM_Motor & motor1,
@@ -289,10 +315,9 @@ void chassis_power_limit(
 {
   float out[4] = {torque1, torque2, torque3, torque4};  //输出端力矩，单位N*m
   sp::RM_Motor * motors[4] = {&motor1, &motor2, &motor3, &motor4};
-  float speed_rad_s[4];      //输出端车轮转速,单位rad/s
-  float power[4];            //每个电机在限制功率前的预计输出功率,单位 W
-  float total_power = 0.0f;  //总功率
-
+  float speed_rad_s[4];  //输出端车轮转速,单位rad/s
+  float power[4];        //每个电机在限制功率前的预计输出功率,单位 W
+  total_power = 0.0f;
   // 1. 计算每个电机的初始预估功率（力矩与转速均为输出端口径，无需乘除减速比）
   for (int i = 0; i < 4; i++) {
     float rotor_rad_s = motors[i]->speed;  //输出端转速，单位rad/s
@@ -306,11 +331,10 @@ void chassis_power_limit(
     if (power[i] > 0.0f) {
       total_power += power[i];
     }
-    total_power += CONST_POWER;  //加上在底盘静态时电调电机的待机能耗
   }
-
+  total_power += CONST_POWER;  //加上在底盘静态时电调电机的待机能耗
   // 2. 超功率时求解全局缩小系数 K（tau' = K * tau），解二次方程：
-  //    K1*Σ(tau²)*K² + Σ(tau*ω)*K + (K2*Σ(ω²) + 4*CONST_POWER - max_power) = 0
+  //    K1*Σ(tau²)*K² + Σ(tau*ω)*K + (K2*Σ(ω²) + CONST_POWER - max_power) = 0
   if (total_power > max_power) {
     float sum_tau_omega = 0.0f;  //Σ(τω)
     float sum_tau2 = 0.0f;       //Σ(τ²)
@@ -325,7 +349,7 @@ void chassis_power_limit(
 
     float a = K1 * sum_tau2;
     float b = sum_tau_omega;
-    float c = K2 * sum_omega2 + 4.0f * CONST_POWER - max_power;
+    float c = K2 * sum_omega2 + CONST_POWER - max_power;
 
     float k = 0.0f;  // 无解时默认清零力矩，保证不反向
     if (a > 0.0f) {
@@ -364,11 +388,11 @@ extern "C" void control_task(void const * argument)
   can1.config();
   can1.start();
   //限制参数
-  const float MAX_SPEED_X = 1.0f;  // 机器人在x方向上的最大速度，单位：m/s
-  const float MAX_SPEED_Y = 1.0f;  // 机器人在y方向上的最大速度，单位：m/s
-  const float MAX_SPEED_W = 1.0f;  // 机器人绕z轴的额定角速度，单位：rad/s
+  const float MAX_SPEED_X = 2.0f;   // 机器人在x方向上的最大速度，单位：m/s
+  const float MAX_SPEED_Y = 1.0f;   // 机器人在y方向上的最大速度，单位：m/s
+  const float MAX_SPEED_W = 10.0f;  // 机器人绕z轴的额定角速度，单位：rad/s
   constexpr float WHEEL_TURN_STOP_ANGLE =
-    10.0f * 2.0f * PI;                          //根据实际测定确认底盘行驶3m时轮子转过的圈数
+    9.0f * 2.0f * PI;                           //根据实际测定确认底盘行驶3m时轮子转过的圈数
   static bool auto_drive_enabled = false;       //判断是否可以开始自动直线行驶
   static bool auto_drive_completed = false;     //判断直线行驶是否结束
   static bool wheel_angle_initialized = false;  //判断
@@ -455,7 +479,7 @@ extern "C" void control_task(void const * argument)
         // 如果方向角度误差过大，调用imu位置环PID计算底盘角速度，进行姿态修正
         float angle_error = imu.yaw - start_yaw;
         float correction_wz = 0.0f;
-        const float auto_straight_speed = 1.0f;  // 自动直线行驶的前进速度，单位：m/s
+        const float auto_straight_speed = 0.5f;  // 自动直线行驶的前进速度，单位：m/s
 
         if (angle_error > 0.1f || angle_error < -0.1f) {
           // 使用IMU位置环PID计算底盘角速度
@@ -525,11 +549,13 @@ extern "C" void control_task(void const * argument)
     // ============================================================
     // 底盘功率限制
     // ============================================================
-
-    chassis_power_limit(
-      torque_1, torque_2, torque_3, torque_4, motor_1, motor_2, motor_3, motor_4, pm02,
-      chassis_max_power);
-
+    total_power = chassis_power_calculate(
+      torque_1, torque_2, torque_3, torque_4, motor_1, motor_2, motor_3, motor_4);
+    if (total_power > chassis_max_power) {
+      chassis_power_limit(
+        torque_1, torque_2, torque_3, torque_4, motor_1, motor_2, motor_3, motor_4, pm02,
+        chassis_max_power);
+    }
     // ----------------------------------------------------
     // 发送电机控制指令
     // ----------------------------------------------------
