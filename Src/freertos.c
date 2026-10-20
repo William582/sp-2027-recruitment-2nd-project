@@ -133,7 +133,7 @@ void MX_FREERTOS_Init(void) {
   plotTaskHandle = osThreadCreate(osThread(plotTask), NULL);
 
   /* definition and creation of GimbalTrackingTask */
-  osThreadDef(GimbalTrackingTask, gimbal_tracking_task, osPriorityRealtime, 0, 1024);
+  osThreadDef(GimbalTrackingTask, gimbal_tracking_task, osPriorityNormal, 0, 1024);
   GimbalTrackingTaskHandle = osThreadCreate(osThread(GimbalTrackingTask), NULL);
 
   /* definition and creation of trajectoryTask */
@@ -145,7 +145,7 @@ void MX_FREERTOS_Init(void) {
   IR_RangingTaskHandle = osThreadCreate(osThread(IR_RangingTask), NULL);
 
   /* definition and creation of GimbalFoldingTask */
-  osThreadDef(GimbalFoldingTask, gimbal_folding_task, osPriorityBelowNormal, 0, 128);
+  osThreadDef(GimbalFoldingTask, gimbal_folding_task, osPriorityNormal, 0, 128);
   GimbalFoldingTaskHandle = osThreadCreate(osThread(GimbalFoldingTask), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */

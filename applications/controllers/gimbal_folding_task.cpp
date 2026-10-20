@@ -2,13 +2,11 @@
 
 #include "can/can.hpp"
 
-// 限制参数
-constexpr float FOLD_THRESHOLD_CM = 30.0f;
+// 折叠参数
+constexpr float FOLD_THRESHOLD_CM = 30.0f;  //云台折叠阈值,单位厘米
 constexpr float IMU_STATIONARY_THRESHOLD_RAD_S = 0.05f;
 constexpr float FOLD_TARGET_ANGLE = 1.5708f;
-constexpr float UNFOLD_TARGET_ANGLE = 0.0f;
-constexpr float FOLD_MOTOR_TOLERANCE = 0.05f;
-constexpr float FOLD_TASK_DT = 0.001f;
+constexpr float FOLD_MOTOR_TOLERANCE = 0.05f;  //误差阈值
 
 // 初始化云台状态，此时应为打开
 FoldState fold_state = FoldState::WAITING;
@@ -87,10 +85,14 @@ extern "C" void gimbal_folding_task(void const * argument)
   imu_init();
   remote_init();
 
+  // 读取并初始化电机的角度
+  HAL_CAN_RxFifo0MsgPendingCallback(&hcan1);
+  const float M2006_START_ANGLE = motor_2006.angle;
+  const float PITCH_START_ANGLE = motor_pitch.angle;
+
   while (true) {
     imu_update();
     HAL_CAN_RxFifo0MsgPendingCallback(&hcan1);
-
     float torque_2006 = 0.0f;
     float torque_pitch = 0.0f;
 
@@ -102,9 +104,7 @@ extern "C" void gimbal_folding_task(void const * argument)
       // DOWN：失能模式
       // ----------------------------------------------------
       case sp::DBusSwitchMode::DOWN: {
-        motor_pitch.torque = 0.0f;
-        motor_2006.torque = 0.0f;
-
+        send_gimbal_commands(0.0f, 0.0f, 0.0f);
         clear_control_pids();
 
         break;
@@ -119,14 +119,21 @@ extern "C" void gimbal_folding_task(void const * argument)
           // WAITING
           // ---------
           case FoldState::WAITING: {
+            torque_2006 = dual_loop_control(
+              pid_position_2006, pid_speed_2006, M2006_START_ANGLE, motor_2006.angle,
+              motor_2006.speed);
+            torque_pitch = dual_loop_control(
+              pid_position_pitch, pid_speed_pitch, PITCH_START_ANGLE, motor_pitch.angle,
+              motor_pitch.speed);
             // 当有效测距值小于阈值时更改云台状态，进入FOLD状态
             if (distance < FOLD_THRESHOLD_CM) {
               fold_state = FoldState::FOLD;
               clear_control_pids();
             }
-            else
+            else {
+              send_gimbal_commands(torque_2006, torque_pitch, 0.0f);
               continue;
-
+            }
             break;
           }
           // ---------
@@ -134,11 +141,11 @@ extern "C" void gimbal_folding_task(void const * argument)
           // ---------
           case FoldState::FOLD: {
             torque_2006 = dual_loop_control(
-              pid_position_2006, pid_speed_2006, -FOLD_TARGET_ANGLE, motor_2006.angle,
+              pid_position_2006, pid_speed_2006, M2006_START_ANGLE, motor_2006.angle,
               motor_2006.speed);
             torque_pitch = dual_loop_control(
-              pid_position_pitch, pid_speed_pitch, FOLD_TARGET_ANGLE, motor_pitch.angle,
-              motor_pitch.speed);
+              pid_position_pitch, pid_speed_pitch, PITCH_START_ANGLE + FOLD_TARGET_ANGLE,
+              motor_pitch.angle, motor_pitch.speed);
 
             send_gimbal_commands(torque_2006, torque_pitch, 0.0f);
 
@@ -147,24 +154,26 @@ extern "C" void gimbal_folding_task(void const * argument)
           default:
             break;
         }  // switch (fold_state)
+        break;
       }
       case sp::DBusSwitchMode::UP: {
-        if (fold_state == FoldState::UNFOLD) {
-          torque_2006 = dual_loop_control(
-            pid_position_2006, pid_speed_2006, UNFOLD_TARGET_ANGLE, motor_2006.angle,
-            motor_2006.speed);
-          torque_pitch = dual_loop_control(
-            pid_position_pitch, pid_speed_pitch, UNFOLD_TARGET_ANGLE, motor_pitch.angle,
-            motor_pitch.speed);
+        torque_2006 = dual_loop_control(
+          pid_position_2006, pid_speed_2006, M2006_START_ANGLE, motor_2006.angle, motor_2006.speed);
+        torque_pitch = dual_loop_control(
+          pid_position_pitch, pid_speed_pitch, PITCH_START_ANGLE, motor_pitch.angle,
+          motor_pitch.speed);
 
-          send_gimbal_commands(torque_2006, torque_pitch, 0.0f);
+        send_gimbal_commands(torque_2006, torque_pitch, 0.0f);
 
-          if (motor_2006.angle == UNFOLD_TARGET_ANGLE && motor_pitch.angle == UNFOLD_TARGET_ANGLE)
-            fold_state = FoldState::UNFOLD;
-        }
+        if (
+          fabsf(motor_2006.angle - M2006_START_ANGLE) < FOLD_MOTOR_TOLERANCE &&
+          fabsf(motor_pitch.angle - PITCH_START_ANGLE) < FOLD_MOTOR_TOLERANCE)
+          fold_state = FoldState::UNFOLD;
+
         break;
       }
     }  //switch (left_switch)
+    osDelay(10);
   }  //while(true)
-  osDelay(10);
+
 }  //任务函数

@@ -64,6 +64,9 @@ void send_gimbal_commands(float torque_1, float torque_2, float torque_3);
 float dual_loop_control(
   sp::PID & position_pid, sp::PID & speed_pid, float target_angle, float actual_angle,
   float actual_speed);
+float dual_loop_control(
+  sp::PID & position_pid, sp::PID & speed_pid, float target_angle, float actual_angle,
+  float actual_speed, float ff_speed, float ff_acc, float ff_speed_gain, float ff_acc_gain);
 // 单环控制函数
 float single_loop_control(sp::PID & pid, float target_variable, float actual_variable);
 // 清空PID参数函数
