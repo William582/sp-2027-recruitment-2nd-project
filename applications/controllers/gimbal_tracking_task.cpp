@@ -49,11 +49,11 @@ volatile bool imu_stationary = false;
 //
 // yaw 是直驱（ratio=1），速度反馈噪声不被减速比缩小；pitch 经 36:1，噪声被除 36。
 // 所以两轴不能共用一套参数：yaw 的速度环更软、滤波更重。
-sp::PID pid_position_yaw(CONTROL_DT, 8.0f, 0.0f, 0.0f, YAW_MAX_VEL, 0.0f, 1.0f, false, false);
-sp::PID pid_speed_yaw(CONTROL_DT, 0.10f, 0.0f, 0.0f, YAW_MAX_TORQUE, 0.30f, 1.0f, false, false);
+sp::PID pid_position_yaw(CONTROL_DT, 15.0f, 0.0f, 0.0f, YAW_MAX_VEL, 0.0f, 1.0f, false, false);
+sp::PID pid_speed_yaw(CONTROL_DT, 0.25f, 0.1f, 0.0f, YAW_MAX_TORQUE, 0.30f, 1.0f, false, false);
 
 sp::PID pid_position_pitch(CONTROL_DT, 14.0f, 0.0f, 0.0f, PITCH_MAX_VEL, 0.0f, 1.0f, false, false);
-sp::PID pid_speed_pitch(CONTROL_DT, 0.25f, 0.0f, 0.0f, PITCH_MAX_TORQUE, 0.30f, 1.0f, false, false);
+sp::PID pid_speed_pitch(CONTROL_DT, 0.25f, 0.3f, 0.0f, PITCH_MAX_TORQUE, 0.30f, 1.0f, false, false);
 
 void clear_tracking_pids()
 {
@@ -93,14 +93,14 @@ sp::AngleUnwrapper yaw_unwrap;
 // pitch 经 36:1，噪声小得多，用 alpha=0.12（约 19 Hz），少吃相位滞后。
 float yaw_speed_lpf = 0.0f;
 float pitch_speed_lpf = 0.0f;
-constexpr float YAW_SPEED_LPF_ALPHA = 0.05f;
+constexpr float YAW_SPEED_LPF_ALPHA = 0.10f;
 constexpr float PITCH_SPEED_LPF_ALPHA = 0.12f;
 
 // ---------------- 跟踪参数 ----------------
 // 零点来自 can.hpp 里写死的 PITCH_ZERO_JOINT / IMU_ZERO_PITCH，
 // 初始化阶段不再标定、不再移动 pitch，展开完成即 READY。
-constexpr float PITCH_CMD_RANGE = 1.20f;   // pitch 关节指令相对固定零点的最大偏移
-constexpr uint32_t TRACK_BLEND_MS = 800;   // 起摆平滑时间（幅值 0→1 线性）
+constexpr float PITCH_CMD_RANGE = 1.20f;  // pitch 关节指令相对固定零点的最大偏移
+constexpr uint32_t TRACK_BLEND_MS = 800;  // 起摆平滑时间（幅值 0→1 线性）
 
 bool imu_ready = false;
 uint16_t imu_settle_ticks = 0;
@@ -120,10 +120,9 @@ void imu_update()
     imu_settle_ticks++;
   }
 
-  imu_stationary = (imu_settle_ticks >= IMU_SETTLE_TICKS) &&
-                   (fabsf(imu.w[0]) < IMU_STATIONARY_RAD_S) &&
-                   (fabsf(imu.w[1]) < IMU_STATIONARY_RAD_S) &&
-                   (fabsf(imu.w[2]) < IMU_STATIONARY_RAD_S);
+  imu_stationary =
+    (imu_settle_ticks >= IMU_SETTLE_TICKS) && (fabsf(imu.w[0]) < IMU_STATIONARY_RAD_S) &&
+    (fabsf(imu.w[1]) < IMU_STATIONARY_RAD_S) && (fabsf(imu.w[2]) < IMU_STATIONARY_RAD_S);
 }
 }  // namespace
 
