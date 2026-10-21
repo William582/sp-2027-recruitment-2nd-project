@@ -1,179 +1,313 @@
+/**
+ * ============================================================
+ * 云台自动折叠任务（对应任务书 4.4.7）
+ * ============================================================
+ *
+ * 【职责】
+ *   独立 FreeRTOS 任务：控制中部 GM6020 完成回零 / 展开 / 折叠，
+ *   并把力矩发布到 fold_torque，由轨迹任务统一打包进 0x1FE。
+ *
+ * 【为什么要有回零 HOMING】
+ *   展开行程是"从折叠位算起的 130°"。如果每次上电都直接把当前角度当折叠位，
+ *   那么复位时机械臂停在展开位（很常见，烧录/复位会掉力矩）就会把基准锁错，
+ *   展开目标变成"再往上 130°"，电机一路顶死并持续饱和。
+ *   所以使能后先朝折叠方向低力矩压到机械限位，停稳 300 ms 再以此为基准。
+ *
+ * 【状态机】
+ *   DISABLED --(使能)------------------------------> HOMING
+ *   HOMING   --(顶住限位并停稳 300ms)--------------> UNFOLDING
+ *   UNFOLDING--(到位)-------------------------------> WAITING
+ *   WAITING  --(触发条件满足)-----------------------> FOLDING
+ *   FOLDING  --(到位)-------------------------------> FOLDED
+ *   FOLDED   --(左拨杆上档)-------------------------> UNFOLDING
+ *   HOMING / UNFOLDING / FOLDING --(超时或越限)-----> FAULT
+ *   FAULT    --(拨杆离开上档后再重新使能)-----------> HOMING
+ *
+ * 【保护措施（4.4.7.3）】
+ *   1. 回零用低力矩（0.45 N·m），顶到限位也不会损坏机构
+ *   2. 行程限位：角度超出 [折叠位, 展开位] ±0.5 rad 立即卸载力矩
+ *   3. 超时：回零 8 s、展开/折叠 3 s 未完成即进入 FAULT
+ *   4. 异常退出：FAULT 输出 0 力矩；且上档模式下 FAULT 不再自动重试，
+ *      必须把拨杆拨离上档才会复位，避免"一直顶着"的死循环
+ *   5. 失能优先：任何一种失能判据成立时立即 DISABLED 并输出 0
+ * ============================================================
+ */
+
 #include <cmath>
 
 #include "can/can.hpp"
+#include "task.h"
 
-// 折叠参数
-constexpr float FOLD_THRESHOLD_CM = 30.0f;  //云台折叠阈值,单位厘米
-constexpr float IMU_STATIONARY_THRESHOLD_RAD_S = 0.05f;
-constexpr float FOLD_TARGET_ANGLE = 1.5708f;
-constexpr float FOLD_MOTOR_TOLERANCE = 0.05f;  //误差阈值
+// 折叠轴：位置 -> 力矩的单环 PID。
+// ki 抵消上段重力造成的静态下垂。
+// kd 先置 0：PID 内部 dout = kd * Δangle / dt，dt=1ms 时 D 项放大约 1000 倍，
+// 实测 kd=0.3 会把编码器量化噪声放大成满力矩自激抖动。抖定之后再逐步加。
+sp::PID pid_fold(CONTROL_DT, 15.0f, 6.0f, 0.0f, FOLD_MAX_TORQUE, 0.6f, 0.7f, false, false);
 
-// 初始化云台状态，此时应为打开
-FoldState fold_state = FoldState::WAITING;
+void clear_fold_pids() { pid_fold.clear(); }
 
-// ----------------------------------------------------
-// 云台电机（M2006 ， M6020*2）
-// ----------------------------------------------------
-sp::RM_Motor motor_2006(1, sp::RM_Motors::M2006, 1.0f, true);    // M2006 #1
-sp::RM_Motor motor_pitch(1, sp::RM_Motors::GM6020, 1.0f, true);  // GM6020 #1
-sp::RM_Motor motor_yaw(2, sp::RM_Motors::GM6020, 1.0f, true);    // GM6020 #2
-// ----------------------------------------------------
-// imu
-// ----------------------------------------------------
-sp::BMI088 bmi088(&hspi1, GPIOA, GPIO_PIN_4, GPIOB, GPIO_PIN_0, r_ab);
-sp::Mahony imu(1e-3f);  // dt=1ms, 1kHz
-bool imu_ready = false;
-
-// imu初始化函数
-void imu_init()
-{
-  bmi088.init();
-  imu_ready = true;
-}
-
-//imu数据更新与姿态解算函数
-void imu_update()
-{
-  if (!imu_ready) {
-    return;
-  }
-  bmi088.update();
-  imu.update(bmi088.acc, bmi088.gyro);
-}
-
-// 陀螺仪存在微小噪声，因此用阈值判断三轴角速度是否接近零。
-bool imu_is_stationary()
-{
-  return fabsf(imu.w[0]) < IMU_STATIONARY_THRESHOLD_RAD_S &&
-         fabsf(imu.w[1]) < IMU_STATIONARY_THRESHOLD_RAD_S &&
-         fabsf(imu.w[2]) < IMU_STATIONARY_THRESHOLD_RAD_S;
-}
-// ----------------------------------------------------
-// 遥控器
-// ----------------------------------------------------
-
-//遥控器初始化函数
-void remote_init() { remote.request(); }
-
-// ----------------------------------------------------
-// PID
-// ----------------------------------------------------
-
-// 单环控制函数
-float single_loop_control(sp::PID & pid, float target_variable, float actual_variable)
-{
-  pid.calc(target_variable, actual_variable);
-  return pid.out;
-}
-
-// 双环控制函数
-float dual_loop_control(
-  sp::PID & position_pid, sp::PID & speed_pid, float target_angle, float actual_angle,
-  float actual_speed)
-{
-  position_pid.calc(target_angle, actual_angle);
-  const float target_speed = position_pid.out;
-  // 位置外环输出目标速度；速度内环输出最终控制量
-  speed_pid.calc(target_speed, actual_speed);
-  return speed_pid.out;
-}
+volatile FoldState fold_state = FoldState::DISABLED;
+volatile float fold_torque = 0.0f;
 
 extern "C" void gimbal_folding_task(void const * argument)
 {
   (void)argument;
-  can_init();
-  imu_init();
-  remote_init();
 
-  // 读取并初始化电机的角度
-  HAL_CAN_RxFifo0MsgPendingCallback(&hcan1);
-  const float M2006_START_ANGLE = motor_2006.angle;
-  const float PITCH_START_ANGLE = motor_pitch.angle;
+  // ---- 等待折叠轴反馈 ----
+  const TickType_t wait_begin = xTaskGetTickCount();
+  while (!motor_fold.is_open()) {
+    if (xTaskGetTickCount() - wait_begin >= pdMS_TO_TICKS(FEEDBACK_WAIT_MS)) break;
+    vTaskDelay(pdMS_TO_TICKS(1));
+  }
+
+  bool homed = false;          // 是否已经回零拿到基准
+  uint16_t still_ticks = 0;    // 回零时"顶住不动"的连续计数
+  float home_angle = 0.0f;     // 回零过程中的角度快照
+  float fold_ref = 0.0f;       // 折叠位（回零得到）
+  float unfold_target = 0.0f;  // 展开位
+  float fold_cmd = 0.0f;       // 斜坡限速后的位置指令
+
+  FoldState state = FoldState::DISABLED;
+  TickType_t state_enter = xTaskGetTickCount();
+  uint16_t confirm_ticks = 0;
+  float torque = 0.0f;
+  float fold_speed_lpf = 0.0f;
+  uint16_t fold_bad_ticks = 0;  // 折叠轴反馈丢帧计数（250 ms 迟滞）
+
+  TickType_t wake = xTaskGetTickCount();
 
   while (true) {
-    imu_update();
-    HAL_CAN_RxFifo0MsgPendingCallback(&hcan1);
-    float torque_2006 = 0.0f;
-    float torque_pitch = 0.0f;
+    const TickType_t now = xTaskGetTickCount();
 
-    // 获取遥控器左拨杆档位
-    const sp::DBusSwitchMode left_switch = remote.sw_l;  //获取左拨杆档位
+    if (!motor_fold.is_open()) {
+      // 没有任何反馈：不动作
+      torque = 0.0f;
+      state = FoldState::DISABLED;
+      state_enter = now;
+      fold_torque = torque;
+      fold_state = state;
+      vTaskDelayUntil(&wake, pdMS_TO_TICKS(1));
+      continue;
+    }
 
-    switch (left_switch) {
-      // ----------------------------------------------------
-      // DOWN：失能模式
-      // ----------------------------------------------------
-      case sp::DBusSwitchMode::DOWN: {
-        send_gimbal_commands(0.0f, 0.0f, 0.0f);
-        clear_control_pids();
+    // 折叠轴反馈看门狗加 250 ms 迟滞：瞬时丢帧不应让状态机重新回零。
+    // 真正的长时间掉线仍会回到 DISABLED。
+    if (motor_fold.is_alive(now)) {
+      fold_bad_ticks = 0;
+    }
+    else if (fold_bad_ticks < 300U) {
+      fold_bad_ticks++;
+    }
+    const bool disabled = gimbal_is_disabled() || (fold_bad_ticks >= 250U);
+    const sp::DBusSwitchMode sw_l = remote_switch_l();
+    const float angle = motor_fold.angle;
+    fold_speed_lpf += FOLD_SPEED_LPF_ALPHA * (motor_fold.speed - fold_speed_lpf);
+    const uint16_t dist = distance;
+    const bool still = imu_stationary;
 
-        break;
+    // ---------------- 状态转移 ----------------
+    if (disabled) {
+      if (state != FoldState::DISABLED) {
+        state = FoldState::DISABLED;
+        state_enter = now;
+        homed = false;
+        still_ticks = 0;
       }
+    }
+    else {
+      switch (state) {
+        case FoldState::DISABLED: {
+          // 重新获得操作权：先回零
+          state = FoldState::HOMING;
+          state_enter = now;
+          homed = false;
+          still_ticks = 0;
+          home_angle = angle;
+          fold_cmd = angle;
+          break;
+        }
 
-      // ----------------------------------------------------
-      // MID：折叠准备模式（当distance小于阈值时折叠）
-      // ----------------------------------------------------
-      case sp::DBusSwitchMode::MID: {
-        switch (fold_state) {
-          // ---------
-          // WAITING
-          // ---------
-          case FoldState::WAITING: {
-            torque_2006 = dual_loop_control(
-              pid_position_2006, pid_speed_2006, M2006_START_ANGLE, motor_2006.angle,
-              motor_2006.speed);
-            torque_pitch = dual_loop_control(
-              pid_position_pitch, pid_speed_pitch, PITCH_START_ANGLE, motor_pitch.angle,
-              motor_pitch.speed);
-            // 当有效测距值小于阈值时更改云台状态，进入FOLD状态
-            if (distance < FOLD_THRESHOLD_CM) {
-              fold_state = FoldState::FOLD;
-              clear_control_pids();
+        case FoldState::HOMING: {
+          // 朝折叠方向（角度减小）低力矩压过去。
+          // 判据用"角度连续 300 ms 几乎不变"，比用速度阈值可靠：
+          // 接近平衡时机械臂可能以极低速度慢慢爬，速度判据会误判成已到限位。
+          if (fabsf(angle - home_angle) < FOLD_HOME_MOVE_EPS_RAD) {
+            if (still_ticks < FOLD_HOME_STILL_TICKS) still_ticks++;
+          }
+          else {
+            still_ticks = 0;
+            home_angle = angle;
+          }
+
+          if (still_ticks >= FOLD_HOME_STILL_TICKS) {
+            fold_ref = angle;
+            unfold_target = fold_ref + FOLD_UNFOLD_SIGN * FOLD_ANGLE_RAD;
+            fold_cmd = fold_ref;
+            homed = true;
+            state = FoldState::UNFOLDING;
+            state_enter = now;
+            confirm_ticks = 0;
+          }
+          else if (now - state_enter > pdMS_TO_TICKS(FOLD_HOME_TIMEOUT_MS)) {
+            state = FoldState::FAULT;
+            state_enter = now;
+          }
+          break;
+        }
+
+        case FoldState::UNFOLDING: {
+          if (fabsf(angle - unfold_target) <= FOLD_REACH_TOLERANCE_RAD) {
+            state = FoldState::WAITING;
+            state_enter = now;
+            confirm_ticks = 0;
+          }
+          else if (now - state_enter > pdMS_TO_TICKS(FOLD_TIMEOUT_MS)) {
+            state = FoldState::FAULT;
+            state_enter = now;
+          }
+          break;
+        }
+
+        case FoldState::WAITING: {
+          // 只在左拨杆中档做自动折叠；上档是跟踪轨迹，不参与折叠
+          bool candidate = false;
+          if (sw_l != sp::DBusSwitchMode::UP) {
+            if (FOLD_TRIGGER_USE_WHEEL) {
+              // 临时方案：测距模块缺失，用遥控器拨轮 ch_lu > 0.5 触发
+              candidate = (remote.ch_lu > FOLD_TRIGGER_CH_LU);
             }
             else {
-              send_gimbal_commands(torque_2006, torque_pitch, 0.0f);
-              continue;
+              // 任务书 4.4.7 正式方案：测距 < 30cm 且 IMU 静止
+              candidate = (dist != IR_INVALID_CM) && (dist < FOLD_TRIGGER_CM) && still;
             }
-            break;
           }
-          // ---------
-          // FOLD
-          // ---------
-          case FoldState::FOLD: {
-            torque_2006 = dual_loop_control(
-              pid_position_2006, pid_speed_2006, M2006_START_ANGLE, motor_2006.angle,
-              motor_2006.speed);
-            torque_pitch = dual_loop_control(
-              pid_position_pitch, pid_speed_pitch, PITCH_START_ANGLE + FOLD_TARGET_ANGLE,
-              motor_pitch.angle, motor_pitch.speed);
 
-            send_gimbal_commands(torque_2006, torque_pitch, 0.0f);
+          const uint16_t need =
+            FOLD_TRIGGER_USE_WHEEL ? FOLD_WHEEL_CONFIRM_TICKS : FOLD_CONFIRM_TICKS;
 
-            break;
+          if (candidate) {
+            if (confirm_ticks < need) confirm_ticks++;
           }
-          default:
-            break;
-        }  // switch (fold_state)
-        break;
+          else {
+            confirm_ticks = 0;
+          }
+
+          if (confirm_ticks >= need) {
+            // 先进入收拢状态：等末端 M2006 收到折叠位后再真正折叠，避免干涉
+            state = FoldState::STOWING;
+            state_enter = now;
+            confirm_ticks = 0;
+          }
+          break;
+        }
+
+        case FoldState::STOWING: {
+          // 中部的 GM6020 保持展开不动，等末端 M2006 自己收到折叠位。
+          // M2006 由跟踪任务控制，它看到 fold_state 不是 WAITING 就会收到 PITCH_FOLD_JOINT。
+          const bool stowed = fabsf(motor_pitch.angle - PITCH_FOLD_JOINT) < PITCH_READY_TOL;
+
+          if (stowed) {
+            state = FoldState::FOLDING;
+            state_enter = now;
+          }
+          else if (now - state_enter > pdMS_TO_TICKS(FOLD_STOW_TIMEOUT_MS)) {
+            // 收不回去也不能一直等，超时后照常折叠（避免卡死）
+            state = FoldState::FOLDING;
+            state_enter = now;
+          }
+          break;
+        }
+
+        case FoldState::FOLDING: {
+          if (fabsf(angle - fold_ref) <= FOLD_REACH_TOLERANCE_RAD) {
+            state = FoldState::FOLDED;
+            state_enter = now;
+          }
+          else if (now - state_enter > pdMS_TO_TICKS(FOLD_TIMEOUT_MS)) {
+            state = FoldState::FAULT;
+            state_enter = now;
+          }
+          break;
+        }
+
+        case FoldState::FOLDED: {
+          if (sw_l == sp::DBusSwitchMode::UP) {
+            // 左拨杆上档：重新展开
+            state = FoldState::UNFOLDING;
+            state_enter = now;
+            confirm_ticks = 0;
+          }
+          break;
+        }
+
+        case FoldState::FAULT: {
+          // 上档模式下不自动重试，必须先把拨杆拨离上档，
+          // 否则会形成"超时->FAULT->立刻重来"的死循环，一直顶着机构。
+          if (sw_l != sp::DBusSwitchMode::UP) {
+            state = FoldState::HOMING;
+            state_enter = now;
+            homed = false;
+            still_ticks = 0;
+            home_angle = angle;
+          }
+          break;
+        }
       }
-      case sp::DBusSwitchMode::UP: {
-        torque_2006 = dual_loop_control(
-          pid_position_2006, pid_speed_2006, M2006_START_ANGLE, motor_2006.angle, motor_2006.speed);
-        torque_pitch = dual_loop_control(
-          pid_position_pitch, pid_speed_pitch, PITCH_START_ANGLE, motor_pitch.angle,
-          motor_pitch.speed);
+    }
 
-        send_gimbal_commands(torque_2006, torque_pitch, 0.0f);
+    // ---------------- 行程越限保护 ----------------
+    if (homed && (state == FoldState::UNFOLDING || state == FoldState::WAITING ||
+                  state == FoldState::STOWING || state == FoldState::FOLDING ||
+                  state == FoldState::FOLDED)) {
+      const float lo = (FOLD_UNFOLD_SIGN > 0.0f) ? fold_ref : unfold_target;
+      const float hi = (FOLD_UNFOLD_SIGN > 0.0f) ? unfold_target : fold_ref;
 
-        if (
-          fabsf(motor_2006.angle - M2006_START_ANGLE) < FOLD_MOTOR_TOLERANCE &&
-          fabsf(motor_pitch.angle - PITCH_START_ANGLE) < FOLD_MOTOR_TOLERANCE)
-          fold_state = FoldState::UNFOLD;
-
-        break;
+      if ((angle < lo - FOLD_LIMIT_MARGIN_RAD) || (angle > hi + FOLD_LIMIT_MARGIN_RAD)) {
+        state = FoldState::FAULT;
+        state_enter = now;
       }
-    }  //switch (left_switch)
-    osDelay(10);
-  }  //while(true)
+    }
 
-}  //任务函数
+    // ---------------- 输出 ----------------
+    if (state == FoldState::HOMING) {
+      // 朝折叠方向（角度减小）的低力矩
+      torque = -FOLD_HOME_TORQUE * FOLD_UNFOLD_SIGN;
+      fold_cmd = angle;
+      clear_fold_pids();
+    }
+    else if (state == FoldState::DISABLED || state == FoldState::FAULT) {
+      torque = 0.0f;
+      fold_cmd = angle;
+      clear_fold_pids();
+    }
+    else {
+      const float goal =
+        ((state == FoldState::FOLDING) || (state == FoldState::FOLDED)) ? fold_ref : unfold_target;
+
+      // 位置指令斜坡限速，避免大行程时满力矩冲击机构
+      const float step = FOLD_MAX_CMD_RATE * CONTROL_DT;
+      if (goal > fold_cmd + step) {
+        fold_cmd += step;
+      }
+      else if (goal < fold_cmd - step) {
+        fold_cmd -= step;
+      }
+      else {
+        fold_cmd = goal;
+      }
+
+      // 积分分离阈值取输出限幅的 60%，大行程时暂停积分累积
+      pid_fold.calc(fold_cmd, angle, FOLD_MAX_TORQUE * 0.6f);
+
+      // 用滤波后的速度做阻尼，抑制展开过程中的小幅抖动
+      torque = pid_fold.out - FOLD_DAMPING * fold_speed_lpf;
+      if (torque > FOLD_MAX_TORQUE) torque = FOLD_MAX_TORQUE;
+      if (torque < -FOLD_MAX_TORQUE) torque = -FOLD_MAX_TORQUE;
+    }
+
+    fold_torque = (DEBUG_FOLD_OPEN_LOOP_TORQUE != 0.0f) ? DEBUG_FOLD_OPEN_LOOP_TORQUE : torque;
+    fold_state = state;
+
+    vTaskDelayUntil(&wake, pdMS_TO_TICKS(1));
+  }
+}
