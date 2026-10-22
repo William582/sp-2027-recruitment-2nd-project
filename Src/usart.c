@@ -22,10 +22,6 @@
 
 /* USER CODE BEGIN 0 */
 
-/* 回环测试开关：1 = USART3 临时改成 8N1/115200 便于 PC 串口注入数据
-   测试完成后改成 0 并重新编译，即恢复 DT7 的 100000/9B/偶校验。 */
-#define LOOPBACK_TEST_USART3 0
-
 /* USER CODE END 0 */
 
 UART_HandleTypeDef huart1;
@@ -79,18 +75,10 @@ void MX_USART3_UART_Init(void)
 
   /* USER CODE END USART3_Init 1 */
   huart3.Instance = USART3;
-#if LOOPBACK_TEST_USART3
-  /* 临时回环测试配置：PC 串口只能发 8N1 */
-  huart3.Init.BaudRate = 115200;
-  huart3.Init.WordLength = UART_WORDLENGTH_8B;
-  huart3.Init.StopBits = UART_STOPBITS_1;
-  huart3.Init.Parity = UART_PARITY_NONE;
-#else
   huart3.Init.BaudRate = 100000;
   huart3.Init.WordLength = UART_WORDLENGTH_9B;
   huart3.Init.StopBits = UART_STOPBITS_1;
   huart3.Init.Parity = UART_PARITY_EVEN;
-#endif
   huart3.Init.Mode = UART_MODE_TX_RX;
   huart3.Init.HwFlowCtl = UART_HWCONTROL_NONE;
   huart3.Init.OverSampling = UART_OVERSAMPLING_16;
