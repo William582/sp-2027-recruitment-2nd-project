@@ -55,7 +55,7 @@ constexpr float PITCH_MAX_VEL = 8.0f;
 // 跟踪调试初期取偏保守的值，优先保证稳定，再逐步加大
 // 实测 yaw 实际曲线超前目标约 40 ms（相位超前约 21°），说明前馈过驱，先各降一档
 constexpr float YAW_FF_VEL = 1.0f;
-constexpr float YAW_FF_ACC = 0.0015f;
+constexpr float YAW_FF_ACC = 0.0012f;
 constexpr float PITCH_FF_VEL = 1.0f;
 constexpr float PITCH_FF_ACC = 0.002f;
 

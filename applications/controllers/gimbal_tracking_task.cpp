@@ -49,11 +49,11 @@ volatile bool imu_stationary = false;
 //
 // yaw 是直驱（ratio=1），速度反馈噪声不被减速比缩小；pitch 经 36:1，噪声被除 36。
 // 所以两轴不能共用一套参数：yaw 的速度环更软、滤波更重。
-sp::PID pid_position_yaw(CONTROL_DT, 15.0f, 0.0f, 0.0f, YAW_MAX_VEL, 0.0f, 1.0f, false, false);
-sp::PID pid_speed_yaw(CONTROL_DT, 0.25f, 0.1f, 0.0f, YAW_MAX_TORQUE, 0.30f, 1.0f, false, false);
+sp::PID pid_position_yaw(CONTROL_DT, 15.0f, 0.0f, 0.0f, YAW_MAX_VEL, 0.0f, 0.1f, false, false);
+sp::PID pid_speed_yaw(CONTROL_DT, 0.33f, 0.1f, 0.0f, YAW_MAX_TORQUE, 0.30f, 0.1f, false, false);
 
-sp::PID pid_position_pitch(CONTROL_DT, 14.0f, 0.0f, 0.0f, PITCH_MAX_VEL, 0.0f, 1.0f, false, false);
-sp::PID pid_speed_pitch(CONTROL_DT, 0.25f, 0.3f, 0.0f, PITCH_MAX_TORQUE, 0.30f, 1.0f, false, false);
+sp::PID pid_position_pitch(CONTROL_DT, 14.0f, 0.0f, 0.0f, PITCH_MAX_VEL, 0.0f, 0.1f, false, false);
+sp::PID pid_speed_pitch(CONTROL_DT, 0.25f, 0.3f, 0.0f, PITCH_MAX_TORQUE, 0.30f, 0.1f, false, false);
 
 void clear_tracking_pids()
 {
