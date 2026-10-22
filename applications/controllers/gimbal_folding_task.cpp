@@ -47,13 +47,13 @@ sp::PID pid_fold(CONTROL_DT, 15.0f, 6.0f, 0.0f, FOLD_MAX_TORQUE, 0.6f, 0.7f, fal
 void clear_fold_pids() { pid_fold.clear(); }
 
 volatile FoldState fold_state = FoldState::DISABLED;
-volatile float fold_torque = 0.0f;
+volatile float fold_torque = 0.0f;  //折叠电机的输出力矩
 
 extern "C" void gimbal_folding_task(void const * argument)
 {
   (void)argument;
 
-  // ---- 等待折叠轴反馈 ----
+  // ---- 等待折叠轴反馈，让跟踪和折叠任务同步启动 ----
   const TickType_t wait_begin = xTaskGetTickCount();
   while (!motor_fold.is_open()) {
     if (xTaskGetTickCount() - wait_begin >= pdMS_TO_TICKS(FEEDBACK_WAIT_MS)) break;
@@ -70,7 +70,7 @@ extern "C" void gimbal_folding_task(void const * argument)
   FoldState state = FoldState::DISABLED;
   TickType_t state_enter = xTaskGetTickCount();
   uint16_t confirm_ticks = 0;
-  float torque = 0.0f;
+  float torque = 0.0f;  //折叠电机输出力矩（局部变量）
   float fold_speed_lpf = 0.0f;
   uint16_t fold_bad_ticks = 0;  // 折叠轴反馈丢帧计数（250 ms 迟滞）
 
@@ -82,10 +82,10 @@ extern "C" void gimbal_folding_task(void const * argument)
     if (!motor_fold.is_open()) {
       // 没有任何反馈：不动作
       torque = 0.0f;
+      fold_torque = torque;  //力矩置零
       state = FoldState::DISABLED;
+      fold_state = state;  //状态机置为DISABLED
       state_enter = now;
-      fold_torque = torque;
-      fold_state = state;
       vTaskDelayUntil(&wake, pdMS_TO_TICKS(1));
       continue;
     }
@@ -98,11 +98,13 @@ extern "C" void gimbal_folding_task(void const * argument)
     else if (fold_bad_ticks < 300U) {
       fold_bad_ticks++;
     }
+    //失能判断变量，涵盖所有失能情况，包括拨杆下档，遥控器、电机链路长时间丢帧
     const bool disabled = gimbal_is_disabled() || (fold_bad_ticks >= 250U);
-    const sp::DBusSwitchMode sw_l = remote_switch_l();
+
+    const sp::DBusSwitchMode sw_l = remote_switch_l();  //左侧拨杆档位
     const float angle = motor_fold.angle;
     fold_speed_lpf += FOLD_SPEED_LPF_ALPHA * (motor_fold.speed - fold_speed_lpf);
-    const uint16_t dist = distance;
+    const uint16_t dist = distance;  //局部变量，承接红外测距distance
     const bool still = imu_stationary;
 
     // ---------------- 状态转移 ----------------
@@ -116,6 +118,7 @@ extern "C" void gimbal_folding_task(void const * argument)
     }
     else {
       switch (state) {
+        // 从DISABLED进入HOMING
         case FoldState::DISABLED: {
           // 重新获得操作权：先回零
           state = FoldState::HOMING;
@@ -140,11 +143,16 @@ extern "C" void gimbal_folding_task(void const * argument)
           }
 
           if (still_ticks >= FOLD_HOME_STILL_TICKS) {
+            // 足够长的时间内电机位置没有发生移动，可以认为已经回零
+            // 将此时的电机位置定为折叠位，同时定义了展开位
             fold_ref = angle;
             unfold_target = fold_ref + FOLD_UNFOLD_SIGN * FOLD_ANGLE_RAD;
+
             fold_cmd = fold_ref;
+            // 从HOMING进入UNFOLDING
             homed = true;
             state = FoldState::UNFOLDING;
+
             state_enter = now;
             confirm_ticks = 0;
           }
@@ -157,6 +165,7 @@ extern "C" void gimbal_folding_task(void const * argument)
 
         case FoldState::UNFOLDING: {
           if (fabsf(angle - unfold_target) <= FOLD_REACH_TOLERANCE_RAD) {
+            // 从UNFOLDING进入WAITTING
             state = FoldState::WAITING;
             state_enter = now;
             confirm_ticks = 0;
@@ -172,16 +181,17 @@ extern "C" void gimbal_folding_task(void const * argument)
           // 只在左拨杆中档做自动折叠；上档是跟踪轨迹，不参与折叠
           bool candidate = false;
           if (sw_l != sp::DBusSwitchMode::UP) {
+            // 两种折叠触发条件
             if (FOLD_TRIGGER_USE_WHEEL) {
               // 临时方案：测距模块缺失，用遥控器拨轮 ch_lu > 0.5 触发
               candidate = (remote.ch_lu > FOLD_TRIGGER_CH_LU);
             }
             else {
-              // 任务书 4.4.7 正式方案：测距 < 30cm 且 IMU 静止
-              candidate = (dist != IR_INVALID_CM) && (dist < FOLD_TRIGGER_CM) && still;
+              // 折叠条件：1.数据有效 2.测距 < 30cm
+              candidate = (dist != IR_INVALID_CM) && (dist < FOLD_TRIGGER_CM);
             }
           }
-
+          // 连续满足need个周期后才认为状态稳定，转换为下一个状态
           const uint16_t need =
             FOLD_TRIGGER_USE_WHEEL ? FOLD_WHEEL_CONFIRM_TICKS : FOLD_CONFIRM_TICKS;
 
@@ -194,6 +204,7 @@ extern "C" void gimbal_folding_task(void const * argument)
 
           if (confirm_ticks >= need) {
             // 先进入收拢状态：等末端 M2006 收到折叠位后再真正折叠，避免干涉
+            // 从UNFOLDING进入STOWING
             state = FoldState::STOWING;
             state_enter = now;
             confirm_ticks = 0;
@@ -205,8 +216,9 @@ extern "C" void gimbal_folding_task(void const * argument)
           // 中部的 GM6020 保持展开不动，等末端 M2006 自己收到折叠位。
           // M2006 由跟踪任务控制，它看到 fold_state 不是 WAITING 就会收到 PITCH_FOLD_JOINT。
           const bool stowed = fabsf(motor_pitch.angle - PITCH_FOLD_JOINT) < PITCH_READY_TOL;
-
+          // 从STOWING变为FOLDING
           if (stowed) {
+            // M2006已进入折叠位
             state = FoldState::FOLDING;
             state_enter = now;
           }
@@ -256,9 +268,11 @@ extern "C" void gimbal_folding_task(void const * argument)
     }
 
     // ---------------- 行程越限保护 ----------------
-    if (homed && (state == FoldState::UNFOLDING || state == FoldState::WAITING ||
-                  state == FoldState::STOWING || state == FoldState::FOLDING ||
-                  state == FoldState::FOLDED)) {
+    if (
+      homed &&
+      // 已回零、正在受控运动或保持位置”的状态
+      (state == FoldState::UNFOLDING || state == FoldState::WAITING ||
+       state == FoldState::STOWING || state == FoldState::FOLDING || state == FoldState::FOLDED)) {
       const float lo = (FOLD_UNFOLD_SIGN > 0.0f) ? fold_ref : unfold_target;
       const float hi = (FOLD_UNFOLD_SIGN > 0.0f) ? unfold_target : fold_ref;
 
@@ -299,7 +313,8 @@ extern "C" void gimbal_folding_task(void const * argument)
       // 积分分离阈值取输出限幅的 60%，大行程时暂停积分累积
       pid_fold.calc(fold_cmd, angle, FOLD_MAX_TORQUE * 0.6f);
 
-      // 用滤波后的速度做阻尼，抑制展开过程中的小幅抖动
+      // 用滤波后的速度做正阻尼，抑制展开过程中的小幅抖动
+      // 相当于Kd的作用，但是经过滤波后的速度更平滑
       torque = pid_fold.out - FOLD_DAMPING * fold_speed_lpf;
       if (torque > FOLD_MAX_TORQUE) torque = FOLD_MAX_TORQUE;
       if (torque < -FOLD_MAX_TORQUE) torque = -FOLD_MAX_TORQUE;

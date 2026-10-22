@@ -137,7 +137,7 @@ extern sp::PID pid_fold;            // 折叠轴：位置 -> 力矩
 // ============================================================
 enum class FoldState : uint8_t
 {
-  DISABLED,   // 失能（右拨杆下档 / 左拨杆下档 / 遥控器链路丢失）
+  DISABLED,   // 失能（右拨杆下档 / 左拨杆下档 / 遥控器链路丢失 / 电机CAN通信中断）
   HOMING,     // 回零：朝折叠方向低力矩压到机械限位
   UNFOLDING,  // 正在展开
   WAITING,    // 已展开，测距工作，等待障碍物
@@ -226,7 +226,7 @@ constexpr float PITCH_SIGN = 1.0f;            // 轨迹 pitch 叠加到关节角
 constexpr float PITCH_READY_TOL = 0.05f;
 
 // 折叠状态下 M2006 的目标角度（实测写死）。
-// 折叠时末端收在机构内侧，2026-10-21 实测自然静止角约 -0.047 rad，
+// 折叠时末端收在机构内侧，实测自然静止角约 -0.047 rad，
 // 用这个值作为折叠位的保持目标，避免它乱摆。
 constexpr float PITCH_FOLD_JOINT = -0.0470f;
 
