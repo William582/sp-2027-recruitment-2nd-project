@@ -53,7 +53,6 @@ constexpr float PITCH_MAX_VEL = 8.0f;
 
 // 前馈增益：速度前馈取 1.0，加速度前馈量纲等价于转动惯量，需实测微调
 // 跟踪调试初期取偏保守的值，优先保证稳定，再逐步加大
-// 实测 yaw 实际曲线超前目标约 40 ms（相位超前约 21°），说明前馈过驱，先各降一档
 constexpr float YAW_FF_VEL = 1.0f;
 constexpr float YAW_FF_ACC = 0.0012f;
 constexpr float PITCH_FF_VEL = 1.0f;
@@ -89,6 +88,8 @@ constexpr uint32_t FOLD_STOW_TIMEOUT_MS = 2500;
 // 所以不用 kd，改成"滤波后的速度 × 阻尼系数"直接减到力矩上。
 constexpr float FOLD_DAMPING = 0.15f;          // N·m per rad/s
 constexpr float FOLD_SPEED_LPF_ALPHA = 0.10f;  // 速度低通
+constexpr float YAW_SPEED_LPF_ALPHA = 0.10f;
+constexpr float PITCH_SPEED_LPF_ALPHA = 0.12f;
 
 // 折叠触发源：
 //   true  = 遥控器拨轮 ch_lu > FOLD_TRIGGER_CH_LU 触发（测距模块缺失期间的临时方案）
@@ -219,16 +220,16 @@ extern volatile uint16_t g_dbus_last_len;
 //   M2006 关节角 = -0.6548 rad
 //   末端 IMU 倾角 = -0.0361 rad
 // 这样初始化完全不动 pitch，展开完成后直接 READY。
-constexpr float PITCH_ZERO_JOINT = -0.6548f;  // 水平姿态下的 M2006 关节角（rad）
+constexpr float PITCH_ZERO_JOINT = -0.6548f;  // 水平姿态下 M2006 关节角，单位rad
 constexpr float IMU_ZERO_PITCH = -0.0361f;    // 同一姿态下的 IMU 倾角（rad，用于校验）
-constexpr float PITCH_SIGN = 1.0f;            // 轨迹 pitch 叠加到关节角的符号
+constexpr float PITCH_SIGN =
+  1.0f;  // M2006 通过减速箱/同步带驱动末端，电机转正方向不一定等于末端 pitch 角增大
 // 认为"已找平 / 可以起摆"的判据：关节角距离水平零点小于此值（约 2.9°）
 constexpr float PITCH_READY_TOL = 0.05f;
 
-// 折叠状态下 M2006 的目标角度（实测写死）。
 // 折叠时末端收在机构内侧，实测自然静止角约 -0.047 rad，
 // 用这个值作为折叠位的保持目标，避免它乱摆。
-constexpr float PITCH_FOLD_JOINT = -0.0470f;
+constexpr float PITCH_FOLD_JOINT = -0.0470f;  // 折叠状态下 M2006 关节角，单位rad。
 
 // 链路丢失（遥控器/电机反馈）判定为失能的迟滞时间。
 // 拨杆下档是操作者明确意图，仍然立即生效；只有"链路抖动"才走这个迟滞，

@@ -93,8 +93,6 @@ sp::AngleUnwrapper yaw_unwrap;
 // pitch 经 36:1，噪声小得多，用 alpha=0.12（约 19 Hz），少吃相位滞后。
 float yaw_speed_lpf = 0.0f;
 float pitch_speed_lpf = 0.0f;
-constexpr float YAW_SPEED_LPF_ALPHA = 0.10f;
-constexpr float PITCH_SPEED_LPF_ALPHA = 0.12f;
 
 // ---------------- 跟踪参数 ----------------
 // 零点来自 can.hpp 里写死的 PITCH_ZERO_JOINT / IMU_ZERO_PITCH，
@@ -151,7 +149,7 @@ extern "C" void gimbal_tracking_task(void const * argument)
   float yaw_offset = 0.0f;
   uint32_t track_start_ms = 0;
 
-  bool enabled_last = false;
+  bool enabled_last = false;  //边缘检测用的锁存位(失能<->使能）
   bool tracking = false;
 
   // 折叠轴"已完全展开"锁存 + 反馈丢帧计数
@@ -185,7 +183,7 @@ extern "C" void gimbal_tracking_task(void const * argument)
 
     const bool disabled = gimbal_is_disabled() || !feedback_ok;
 
-    const FoldState fs = fold_state;
+    const FoldState fs = fold_state;  //读取状态副本
     const bool base_ready = (fs == FoldState::WAITING);
 
     // 一旦展开完成就锁存，只有真正失能才清除。
@@ -205,7 +203,7 @@ extern "C" void gimbal_tracking_task(void const * argument)
 
     if (disabled) {
       // ---- 失能：最高优先级 ----
-      if (enabled_last) {
+      if (enabled_last) {  //"使能→失能"的下降沿
         enabled_last = false;
         tracking = false;
         clear_tracking_pids();
@@ -222,7 +220,7 @@ extern "C" void gimbal_tracking_task(void const * argument)
       plot_pitch_torque = 0.0f;
     }
     else {
-      if (!enabled_last) {
+      if (!enabled_last) {  //"失能→使能"的上升沿
         enabled_last = true;
         tracking = false;
         hold_yaw = yaw_angle;
@@ -232,7 +230,7 @@ extern "C" void gimbal_tracking_task(void const * argument)
 
       const sp::DBusSwitchMode sw_l = remote_switch_l();
       const TrajectoryPoint traj = trajectory_read();
-
+      // 看门狗超过250ms没有收到信号，清空pid参数
       if (!yp_alive) {
         clear_tracking_pids();
       }
@@ -266,7 +264,7 @@ extern "C" void gimbal_tracking_task(void const * argument)
           yaw_offset = yaw_angle;  // 从当前姿态起步
           clear_tracking_pids();
         }
-
+        // 线性软启动
         const uint32_t elapsed = now_ms - track_start_ms;
         const float blend =
           (elapsed < TRACK_BLEND_MS) ? (static_cast<float>(elapsed) / TRACK_BLEND_MS) : 1.0f;
