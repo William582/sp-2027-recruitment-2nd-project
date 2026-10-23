@@ -50,6 +50,110 @@ sp::DBusSwitchMode remote_switch_l()
 }
 
 // ============================================================
+// 自动展开（Auto Deploy）
+// ============================================================
+// 只有 ACTIVE 才把左拨杆覆盖成上档；IDLE/COUNTING/PENDING 期间
+// effective_switch_l() 返回物理拨杆，所以遇障折叠等原有功能不受影响。
+namespace
+{
+enum class AutoDeployState : uint8_t
+{
+  IDLE,      // 未触发
+  COUNTING,  // 计时中
+  PENDING,   // 计时已到，等机构稳定
+  ACTIVE,    // 自动模式生效（等效上档）
+};
+
+AutoDeployState auto_state = AutoDeployState::IDLE;
+uint32_t auto_count_since = 0;   // COUNTING 起点
+uint32_t auto_stable_since = 0;  // 进入稳定状态的起点
+bool auto_stick_armed = true;    // 摇杆是否已回落到释放阈值以下
+sp::DBusSwitchMode auto_last_sw = sp::DBusSwitchMode::DOWN;  // 上一拍的物理左拨杆
+
+bool fold_state_stable_for_auto()
+{
+  const FoldState s = fold_state;
+  return (s == FoldState::WAITING) || (s == FoldState::FOLDED);
+}
+}  // namespace
+
+void auto_deploy_update(uint32_t now_ms)
+{
+  if (!AUTO_DEPLOY_ENABLE) {
+    return;  // 编译期关闭：完全等同手动模式
+  }
+
+  const sp::DBusSwitchMode sw_now = remote_switch_l();
+
+  // 拨杆档位变化 = 操作者要接管，直接回到手动
+  if (sw_now != auto_last_sw) {
+    auto_last_sw = sw_now;
+    if (auto_state != AutoDeployState::IDLE) {
+      auto_state = AutoDeployState::IDLE;
+    }
+  }
+
+  // 失能优先（拨杆下档 / 链路丢失）
+  if (gimbal_is_disabled()) {
+    auto_state = AutoDeployState::IDLE;
+    auto_stick_armed = false;
+    return;
+  }
+
+  // 摇杆回落到释放阈值以下才允许重新触发
+  if (remote.ch_lv < AUTO_DEPLOY_RELEASE) {
+    auto_stick_armed = true;
+  }
+
+  const bool stable = fold_state_stable_for_auto();
+
+  switch (auto_state) {
+    case AutoDeployState::IDLE: {
+      // 只认"向上推到底"这一次上升沿
+      if (auto_stick_armed && (remote.ch_lv >= AUTO_DEPLOY_STICK)) {
+        auto_stick_armed = false;
+        auto_state = AutoDeployState::COUNTING;
+        auto_count_since = now_ms;
+      }
+      break;
+    }
+
+    case AutoDeployState::COUNTING: {
+      if ((now_ms - auto_count_since) >= AUTO_DEPLOY_DELAY_MS) {
+        auto_state = AutoDeployState::PENDING;
+        auto_stable_since = now_ms;
+      }
+      break;
+    }
+
+    case AutoDeployState::PENDING: {
+      if (stable) {
+        if ((now_ms - auto_stable_since) >= AUTO_DEPLOY_STABLE_MS) {
+          auto_state = AutoDeployState::ACTIVE;
+        }
+      }
+      else {
+        // 还在折叠/展开途中：重新计时，等它稳定下来
+        auto_stable_since = now_ms;
+      }
+      break;
+    }
+
+    case AutoDeployState::ACTIVE: {
+      break;  // 一直保持，直到上面的复位条件生效
+    }
+  }
+}
+
+sp::DBusSwitchMode effective_switch_l()
+{
+  if (AUTO_DEPLOY_ENABLE && (auto_state == AutoDeployState::ACTIVE)) {
+    return sp::DBusSwitchMode::UP;
+  }
+  return remote_switch_l();
+}
+
+// ============================================================
 // 失能判据
 // ============================================================
 bool gimbal_is_disabled()

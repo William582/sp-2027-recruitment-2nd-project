@@ -181,6 +181,9 @@ extern "C" void gimbal_tracking_task(void const * argument)
 
     const uint32_t now_ms = xTaskGetTickCount();
 
+    // 自动展开计时器（每拍推进一次，内部处理失能/拨杆变化复位）
+    auto_deploy_update(now_ms);
+
     // yaw/pitch 反馈看门狗：加 250 ms 迟滞，避免瞬时丢帧把力矩清零
     if (motor_yaw.is_alive(now_ms) && motor_pitch.is_alive(now_ms)) {
       yp_bad_ticks = 0;
@@ -237,7 +240,7 @@ extern "C" void gimbal_tracking_task(void const * argument)
         clear_tracking_pids();
       }
 
-      const sp::DBusSwitchMode sw_l = remote_switch_l();
+      const sp::DBusSwitchMode sw_l = effective_switch_l();  // 含自动展开覆盖
       const TrajectoryPoint traj = trajectory_read();
       // 看门狗超过250ms没有收到信号，清空pid参数
       if (!yp_alive) {

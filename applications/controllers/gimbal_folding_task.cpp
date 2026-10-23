@@ -101,7 +101,7 @@ extern "C" void gimbal_folding_task(void const * argument)
     //失能判断变量，涵盖所有失能情况，包括拨杆下档，遥控器、电机链路长时间丢帧
     const bool disabled = gimbal_is_disabled() || (fold_bad_ticks >= 250U);
 
-    const sp::DBusSwitchMode sw_l = remote_switch_l();  //左侧拨杆档位
+    const sp::DBusSwitchMode sw_l = effective_switch_l();  //左侧拨杆档位（含自动展开覆盖）
     const float angle = motor_fold.angle;
     fold_speed_lpf += FOLD_SPEED_LPF_ALPHA * (motor_fold.speed - fold_speed_lpf);
     const uint16_t dist = distance;  //局部变量，承接红外测距distance

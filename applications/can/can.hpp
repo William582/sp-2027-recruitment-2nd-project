@@ -216,6 +216,31 @@ constexpr float DEBUG_FOLD_OPEN_LOOP_TORQUE = 0.0f;
 sp::DBusSwitchMode remote_switch_r();
 sp::DBusSwitchMode remote_switch_l();
 
+// ============================================================
+// 自动展开（Auto Deploy）
+// ============================================================
+// 把左摇杆向上推到底（ch_lv ≥ 0.95）后开始计时，计时到点自动进入"上档"语义：
+//   折叠态 → 先展开；展开后 → 自动起摆跟踪。不需要再手动拨上档。
+//
+//   IDLE     → effective = 物理拨杆，行为与手动模式完全相同
+//   COUNTING → 同上（这段期间"遇障自动折叠"照常工作）
+//   PENDING  → 计时已到，等机构稳定（见 AUTO_DEPLOY_STABLE_MS）
+//   ACTIVE   → effective = 上档（自动跟踪；遇障折叠被抑制，直到操作者动拨杆）
+//
+// 复位（回 IDLE）：失能 / 物理左拨杆档位变化 / 摇杆回落到 AUTO_DEPLOY_RELEASE 以下。
+constexpr bool AUTO_DEPLOY_ENABLE = true;        // 总开关：false 时行为完全回到手动
+constexpr float AUTO_DEPLOY_STICK = 0.95f;       // ch_lv ≥ 此值开始计时（只认向上）
+constexpr float AUTO_DEPLOY_RELEASE = 0.80f;     // 必须回落到此值以下才能重新触发
+constexpr uint32_t AUTO_DEPLOY_DELAY_MS = 9000;  // 计时时长（现场按实际行驶时间调）
+constexpr uint32_t AUTO_DEPLOY_STABLE_MS = 300;  // 机构稳定多久才允许放行
+
+// 每个控制周期调用一次（跟踪任务里），推进计时状态机
+void auto_deploy_update(uint32_t now_ms);
+
+// 控制逻辑实际使用的左拨杆档位：自动模式 ACTIVE 时返回 UP，否则返回物理拨杆。
+// 注意：gimbal_is_disabled() 只认物理拨杆，绝不使用本函数。
+sp::DBusSwitchMode effective_switch_l();
+
 // DBus 串口诊断（由 IR 任务的 UART 回调维护）
 extern volatile uint16_t g_dbus_events;
 extern volatile uint16_t g_dbus_last_len;
