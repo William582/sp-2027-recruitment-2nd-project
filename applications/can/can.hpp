@@ -61,8 +61,11 @@ constexpr float PITCH_FF_ACC = 0.002f;
 // ============================================================
 // 自动折叠参数（4.4.7）
 // ============================================================
-constexpr float FOLD_TRIGGER_CM = 30.0f;           // 障碍物触发距离
-constexpr uint16_t FOLD_CONFIRM_TICKS = 50;        // 连续 50 个周期满足才动作（消抖）
+constexpr float FOLD_TRIGGER_CM = 60.0f;     // 障碍物触发距离
+constexpr uint16_t FOLD_CONFIRM_TICKS = 50;  // 连续 50 个周期满足才动作（消抖）
+// 展开到位后先等机构稳定，再让红外测距参与折叠判断。
+// 否则刚进入 WAITING 时末端还没停稳、红外可能正对地面/机构，会立刻误触发折叠。
+constexpr uint32_t FOLD_IR_SETTLE_MS = 5000;       //延时读数
 constexpr float FOLD_REACH_TOLERANCE_RAD = 0.03f;  // 到位判据
 constexpr uint32_t FOLD_TIMEOUT_MS = 3000;         // 折叠/展开超时
 constexpr float FOLD_LIMIT_MARGIN_RAD = 0.50f;     // 行程越限保护余量
@@ -93,9 +96,9 @@ constexpr float PITCH_SPEED_LPF_ALPHA = 0.12f;
 
 // 折叠触发源：
 //   true  = 遥控器拨轮 ch_lu > FOLD_TRIGGER_CH_LU 触发（测距模块缺失期间的临时方案）
-//   false = GY-56 测距 < 30cm 且 IMU 静止 触发（任务书 4.4.7 的正式方案）
+//   false = GY-56 测距 < FOLD_TRIGGER_CM，且展开已稳定 FOLD_IR_SETTLE_MS
 // 测距模块接回后把这里改成 false 即可，其余状态机不用动。
-constexpr bool FOLD_TRIGGER_USE_WHEEL = true;
+constexpr bool FOLD_TRIGGER_USE_WHEEL = false;
 constexpr float FOLD_TRIGGER_CH_LU = 0.5f;         // 拨轮触发阈值
 constexpr uint16_t FOLD_WHEEL_CONFIRM_TICKS = 20;  // 拨轮触发消抖周期数（20 ms）
 
@@ -154,16 +157,16 @@ extern volatile float fold_torque;  // 折叠任务输出，由轨迹任务打�
 // ============================================================
 // 共享传感器数据
 // ============================================================
-extern volatile uint16_t distance;       // 单位 cm，IR_INVALID_CM 表示无效
-extern volatile float plot_distance_cm;  // 绘图用：无效时为 -1
-extern volatile bool imu_stationary;     // IMU 静止标志
+extern volatile uint16_t distance;        // 单位 cm，IR_INVALID_CM 表示无效
+extern volatile float plot_distance_cm;   // 绘图用：滤波后，无效时为 -1
+extern volatile float plot_distance_raw;  // 绘图用：滤波前原始值，无效时为 -1
+extern volatile bool imu_stationary;      // IMU 静止标志
 
 // ============================================================
 // 绘图通道（SerialPlot）
-//   ch1 yaw目标  ch2 yaw实际  ch3 pitch目标  ch4 pitch实际
-//   ch5 yaw力矩  ch6 pitch力矩 ch7 测距(cm)
-//   ch8 折叠轴角度(rad)  ch9 折叠轴力矩(N·m)  ch10 电机在线位图
-//   ch10 位定义：bit0 = yaw 在线, bit1 = pitch 在线, bit2 = fold 在线
+//   ch1 distance 滤波后(cm)   ch2 distance 原始值(cm)   ch3 pitch目标  ch4 pitch实际
+//   ch5 yaw力矩  ch6 pitch力矩  ch7 测距滤波后(cm) ...
+// 完整 17 路顺序见 applications/plot_task.cpp
 // ============================================================
 extern volatile float plot_yaw_target;
 extern volatile float plot_yaw_actual;
@@ -224,8 +227,8 @@ extern volatile uint16_t g_dbus_last_len;
 //   M2006 关节角 = -0.6548 rad
 //   末端 IMU 倾角 = -0.0361 rad
 // 这样初始化完全不动 pitch，展开完成后直接 READY。
-constexpr float PITCH_ZERO_JOINT = -0.6548f;  // 水平姿态下 M2006 关节角，单位rad
-constexpr float IMU_ZERO_PITCH = -0.0361f;    // 同一姿态下的 IMU 倾角（rad，用于校验）
+constexpr float PITCH_ZERO_JOINT = -0.75f;  // 水平姿态下 M2006 关节角，单位rad
+constexpr float IMU_ZERO_PITCH = -0.0361f;  // 同一姿态下的 IMU 倾角（rad，用于校验）
 constexpr float PITCH_SIGN =
   1.0f;  // M2006 通过减速箱/同步带驱动末端，电机转正方向不一定等于末端 pitch 角增大
 // 认为"已找平 / 可以起摆"的判据：关节角距离水平零点小于此值（约 2.9°）

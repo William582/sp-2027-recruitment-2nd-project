@@ -186,8 +186,14 @@ extern "C" void gimbal_folding_task(void const * argument)
               candidate = (remote.ch_lu > FOLD_TRIGGER_CH_LU);
             }
             else {
-              // 折叠条件：1.数据有效 2.测距 < 30cm
-              candidate = (dist != IR_INVALID_CM) && (dist < FOLD_TRIGGER_CM);
+              // 折叠条件：1.展开后先稳定 FOLD_IR_SETTLE_MS，2.数据有效 3.测距 < 阈值。
+              // 刚进入 WAITING 时机构还在动、红外可能对着地面/自身，不能立刻判断，
+              // 否则会出现"刚展开就折叠"。
+              const bool ir_ready =
+                (now - state_enter) >= pdMS_TO_TICKS(FOLD_IR_SETTLE_MS);
+              if (ir_ready) {
+                candidate = (dist != IR_INVALID_CM) && (dist < FOLD_TRIGGER_CM);
+              }
             }
           }
           // 连续满足need个周期后才认为状态稳定，转换为下一个状态
