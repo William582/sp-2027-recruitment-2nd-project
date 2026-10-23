@@ -191,6 +191,10 @@ extern volatile float plot_pitch_speed;
 // 末端 IMU 的 pitch（rad）：C 板固定在末端，这就是末端绝对倾角，0 = 水平
 extern volatile float plot_imu_pitch;
 
+// refer 模块输出的对准度（0~1，1 表示最近约 1 s 一直对准）
+extern volatile float plot_yaw_fire;
+extern volatile float plot_pitch_fire;
+
 // ============================================================
 // 调试旁路（验收前必须关闭）
 // ============================================================

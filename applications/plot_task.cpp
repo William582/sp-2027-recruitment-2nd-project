@@ -15,9 +15,8 @@
  */
 
 #include "FreeRTOS.h"
-#include "task.h"
-
 #include "can/can.hpp"
+#include "task.h"
 
 sp::Plotter plotter(&huart1, false);
 
@@ -36,7 +35,7 @@ extern "C" void plot_task(void const * argument)
     plotter.plot(
       plot_yaw_target, plot_yaw_actual, plot_pitch_target, plot_pitch_actual, plot_yaw_torque,
       plot_pitch_torque, plot_distance_cm, plot_fold_angle, plot_fold_torque, plot_motor_status,
-      plot_can_id_mask, plot_rc_status, plot_fold_state, plot_dbus_len, plot_yaw_speed,
+      plot_can_id_mask, plot_yaw_fire, plot_pitch_fire, plot_dbus_len, plot_yaw_speed,
       plot_pitch_speed, plot_imu_pitch);
 
     vTaskDelayUntil(&wake, pdMS_TO_TICKS(PLOT_PERIOD_MS));

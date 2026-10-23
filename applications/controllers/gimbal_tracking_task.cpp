@@ -30,6 +30,7 @@
 #include <cmath>
 
 #include "can/can.hpp"
+#include "refer/refer.hpp"
 #include "task.h"
 
 // ============================================================
@@ -50,7 +51,7 @@ volatile bool imu_stationary = false;
 // yaw 是直驱（ratio=1），速度反馈噪声不被减速比缩小；pitch 经 36:1，噪声被除 36。
 // 所以两轴不能共用一套参数：yaw 的速度环更软、滤波更重。
 sp::PID pid_position_yaw(CONTROL_DT, 15.0f, 0.0f, 0.0f, YAW_MAX_VEL, 0.0f, 0.1f, false, false);
-sp::PID pid_speed_yaw(CONTROL_DT, 0.33f, 0.1f, 0.0f, YAW_MAX_TORQUE, 0.30f, 0.1f, false, false);
+sp::PID pid_speed_yaw(CONTROL_DT, 0.32f, 0.1f, 0.0f, YAW_MAX_TORQUE, 0.30f, 0.1f, false, false);
 
 sp::PID pid_position_pitch(CONTROL_DT, 14.0f, 0.0f, 0.0f, PITCH_MAX_VEL, 0.0f, 0.1f, false, false);
 sp::PID pid_speed_pitch(CONTROL_DT, 0.25f, 0.3f, 0.0f, PITCH_MAX_TORQUE, 0.30f, 0.1f, false, false);
@@ -82,6 +83,10 @@ volatile float plot_dbus_len = 0.0f;
 volatile float plot_yaw_speed = 0.0f;
 volatile float plot_pitch_speed = 0.0f;
 volatile float plot_imu_pitch = 0.0f;
+
+// refer 模块输出的对准度（0~1，1 表示 1 s 内一直对准）
+volatile float plot_yaw_fire = 0.0f;
+volatile float plot_pitch_fire = 0.0f;
 
 namespace
 {
@@ -156,6 +161,10 @@ extern "C" void gimbal_tracking_task(void const * argument)
   bool base_latched = false;
   bool track_armed = false;  // 起摆许可锁存
   uint16_t yp_bad_ticks = 0;
+
+  // refer 模块的对准度滤波器状态：α=0.001，必须跨拍保留，不能每拍重新定义
+  float yaw_fire_ratio = 0.0f;
+  float pitch_fire_ratio = 0.0f;
 
   uint16_t id_mask_ticks = 0U;
   TickType_t wake = xTaskGetTickCount();
@@ -341,6 +350,18 @@ extern "C" void gimbal_tracking_task(void const * argument)
       plot_pitch_torque = torque_pitch;
     }
 
+    // 对准度检测（refer 模块）：
+    //   α=0.001、调用周期 1 ms → 时间常数约 1000 ms；
+    //   输出 0~1，表示最近约 1 s 内处于对准状态的比例。
+    //   必须在每拍都调用（失能时目标保持当前姿态，比例会自然衰减到 0），
+    //   否则暂停跟踪期间比例会冻结。
+    //   实际角和规划角使用同一套坐标：yaw 用展开后的编码器角，pitch 用 M2006
+    //   关节角；这样和 plot_yaw_target / plot_pitch_target 的基准一致。
+    yaw_detect(yaw_angle, plot_yaw_target, &yaw_fire_ratio);
+    pitch_detect(motor_pitch.angle, plot_pitch_target, &pitch_fire_ratio);
+    plot_yaw_fire = yaw_fire_ratio;
+    plot_pitch_fire = pitch_fire_ratio;
+
     // 与使能状态无关的诊断通道
     plot_fold_angle = motor_fold.angle;
     plot_fold_torque = fold_torque;
@@ -367,7 +388,6 @@ extern "C" void gimbal_tracking_task(void const * argument)
     plot_yaw_speed = motor_yaw.speed;
     plot_pitch_speed = motor_pitch.speed;
     plot_imu_pitch = imu.pitch;
-
     vTaskDelayUntil(&wake, pdMS_TO_TICKS(1));
   }
 }

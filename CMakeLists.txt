@@ -64,6 +64,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     sp_middleware/tools/pid/pid.cpp
     sp_middleware/tools/crc/crc.cpp
     applications/trajectory_task.cpp
+    applications/refer/refer.cpp
     sp_middleware/io/laser/laser.cpp# # Add user sources here
 )
 

@@ -105,7 +105,6 @@ extern "C" void gimbal_folding_task(void const * argument)
     const float angle = motor_fold.angle;
     fold_speed_lpf += FOLD_SPEED_LPF_ALPHA * (motor_fold.speed - fold_speed_lpf);
     const uint16_t dist = distance;  //局部变量，承接红外测距distance
-    const bool still = imu_stationary;
 
     // ---------------- 状态转移 ----------------
     if (disabled) {
