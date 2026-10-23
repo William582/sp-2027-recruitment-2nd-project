@@ -26,13 +26,55 @@ volatile float plot_distance_cm = -1.0f;
 volatile uint16_t g_dbus_events = 0;
 volatile uint16_t g_dbus_last_len = 0;
 
+namespace
+{
+// GY-56 出厂默认 9600，也可能被上位机改成 115200。
+// 启动时两档各听一段时间，收到第一帧有效数据后锁定，不靠“发命令改波特率”
+// —— 波特率不匹配时那条命令模块根本收不到。
+constexpr uint32_t IR_BAUD_WINDOW_MS = 300;
+constexpr uint8_t IR_BAUD_SCAN_ROUNDS = 3;
+constexpr uint32_t IR_BAUDS[] = {9600U, 115200U};
+
+bool wait_for_frame(uint32_t window_ms)
+{
+  const uint32_t frames = laser.rx_frames();
+  const uint32_t start = HAL_GetTick();
+  while ((HAL_GetTick() - start) < window_ms) {
+    if (laser.rx_frames() != frames) {
+      return true;  // 收到至少一帧校验通过的数据
+    }
+    osDelay(1);
+  }
+  return false;
+}
+
+bool lock_baud_rate()
+{
+  for (uint8_t round = 0; round < IR_BAUD_SCAN_ROUNDS; ++round) {
+    for (uint32_t baud : IR_BAUDS) {
+      if (!laser.set_uart_baud_rate(baud)) {
+        continue;
+      }
+      laser.start_receive();
+      if (wait_for_frame(IR_BAUD_WINDOW_MS)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+}  // namespace
+
 extern "C" void IR_ranging_task(void const * argument)
 {
   (void)argument;
 
-  laser.start_receive();
-  laser.set_baud_rate_115200();
-  laser.save_config();
+  // 模块上电后需要一点时间才能稳定输出
+  osDelay(1000);
+
+  // 自动匹配模块当前波特率（9600 / 115200），找不到也继续跑：
+  // 主循环会持续发布无效值，模块恢复后接收回调仍会更新。
+  (void)lock_baud_rate();
 
   while (true) {
     uint16_t value = IR_INVALID_CM;
